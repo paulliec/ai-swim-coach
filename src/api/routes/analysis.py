@@ -16,8 +16,9 @@ import logging
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from ...core.analysis.coach import FrameSet
 from ...core.analysis.models import (
@@ -99,6 +100,7 @@ async def upload_frames(
     frames: Annotated[list[UploadFile], File(description="Video frames as images (JPEG/PNG)")],
     stroke_type: Annotated[StrokeType, Form()] = StrokeType.FREESTYLE,
     user_notes: Annotated[str, Form()] = "",
+    x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     storage: StorageClientDep = None,
     repository: SessionRepositoryDep = None,
@@ -143,6 +145,7 @@ async def upload_frames(
             "session_id": str(session_id),
             "frame_count": len(frames),
             "stroke_type": stroke_type.value,
+            "user_id": x_user_id or "anonymous",
         }
     )
     
@@ -260,6 +263,7 @@ async def upload_frames(
 async def analyze_session(
     session_id: UUID,
     request: AnalysisRequest,
+    x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     coach: SwimCoachDep = None,
     storage: StorageClientDep = None,

@@ -127,30 +127,87 @@ swimcoach/
 
 ## Local Development
 
+### Backend Setup
+
 ```bash
-# Clone and setup
-cp .env.example .env
-# Add your API keys to .env
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# or: source .venv/bin/activate  # Mac/Linux
 
-# Run with Docker
-docker-compose up
-
-# Or run directly
+# Install dependencies
 pip install -e ".[dev]"
+
+# Configure environment
+cp env.template .env
+# Edit .env and add your Anthropic API key
+# Leave mock modes enabled for local testing
+
+# Run backend
 uvicorn src.main:app --reload
 ```
 
+Backend will be available at http://localhost:8000
+
+### Frontend Setup
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Configure Clerk authentication
+cp env.example .env.local
+# Edit .env.local and add your Clerk publishable key
+# Get it from: https://dashboard.clerk.com/
+
+# Run frontend
+npm run dev
+```
+
+Frontend will be available at http://localhost:3000
+
+### Clerk Authentication Setup
+
+1. **Create a Clerk account**: https://clerk.com/
+2. **Create a new application** in the Clerk dashboard
+3. **Copy your Publishable Key** from the API Keys page
+4. **Add to frontend/.env.local**:
+   ```
+   VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+   ```
+5. **Configure sign-in options** (email, Google, etc.) in Clerk dashboard
+
+The frontend will now require authentication. Users must sign in to:
+- Upload videos
+- Get AI coaching feedback
+- View their session history
+
 ## Environment Variables
+
+### Backend
 
 | Variable | Description | Required |
 |----------|-------------|----------|
 | ANTHROPIC_API_KEY | Claude API access | Yes |
-| SNOWFLAKE_ACCOUNT | Snowflake account identifier | Yes |
-| SNOWFLAKE_USER | Service account username | Yes |
-| SNOWFLAKE_PASSWORD | Service account password | Yes |
-| SNOWFLAKE_DATABASE | Database name | Yes |
-| STORAGE_BUCKET | S3/R2 bucket for videos | Yes |
+| SNOWFLAKE_ACCOUNT | Snowflake account identifier | Yes (unless mock mode) |
+| SNOWFLAKE_USER | Service account username | Yes (unless mock mode) |
+| SNOWFLAKE_PASSWORD | Service account password | Yes (unless mock mode) |
+| SNOWFLAKE_DATABASE | Database name | Yes (unless mock mode) |
+| SNOWFLAKE_MOCK_MODE | Use in-memory database | No (default: false) |
+| R2_ACCOUNT_ID | Cloudflare R2 account ID | Yes (unless mock mode) |
+| R2_ACCESS_KEY_ID | R2 access key | Yes (unless mock mode) |
+| R2_SECRET_ACCESS_KEY | R2 secret key | Yes (unless mock mode) |
+| R2_BUCKET_NAME | R2 bucket name | Yes (unless mock mode) |
+| R2_MOCK_MODE | Use in-memory storage | No (default: false) |
 | LOG_LEVEL | Logging verbosity | No (default: INFO) |
+
+### Frontend
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| VITE_CLERK_PUBLISHABLE_KEY | Clerk authentication | Yes |
 
 ## API Endpoints
 

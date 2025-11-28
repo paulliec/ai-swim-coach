@@ -14,8 +14,9 @@ The conversation history is maintained in the database, enabling:
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field
+from typing import Optional
 
 from ...core.analysis.models import CoachingSession
 from ..dependencies import (
@@ -91,6 +92,7 @@ class SessionDetailResponse(BaseModel):
 async def chat_with_coach(
     session_id: UUID,
     request: ChatRequest,
+    x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     coach: SwimCoachDep = None,
     repository: SessionRepositoryDep = None,
@@ -193,6 +195,7 @@ async def chat_with_coach(
 )
 async def get_session(
     session_id: UUID,
+    x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> SessionDetailResponse:
@@ -260,6 +263,7 @@ async def get_session(
 )
 async def delete_session(
     session_id: UUID,
+    x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> None:

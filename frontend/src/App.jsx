@@ -1,12 +1,19 @@
 import { useState, useRef } from 'react'
+import { SignIn, UserButton, useUser, SignedIn, SignedOut } from '@clerk/clerk-react'
+import SessionHistory from './components/SessionHistory'
 
 const STROKE_TYPES = ['freestyle', 'backstroke', 'breaststroke', 'butterfly']
 const API_BASE = '/api/v1'
 
 function App() {
+  const { user, isLoaded } = useUser()
+  
   // API Key
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('swimcoach_api_key') || '')
   const [showApiKeyInput, setShowApiKeyInput] = useState(!apiKey)
+  
+  // View state
+  const [view, setView] = useState('upload') // 'upload' or 'history'
   
   // Video & Frames
   const [videoFile, setVideoFile] = useState(null)
@@ -146,7 +153,8 @@ function App() {
       const uploadRes = await fetch(`${API_BASE}/analysis/upload`, {
         method: 'POST',
         headers: {
-          'X-API-Key': apiKey
+          'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous'
         },
         body: formData
       })
@@ -167,6 +175,7 @@ function App() {
         method: 'POST',
         headers: {
           'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -211,6 +220,7 @@ function App() {
         method: 'POST',
         headers: {
           'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -237,18 +247,115 @@ function App() {
     }
   }
 
+  // Handle loading state
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-cyan-50 flex items-center justify-center">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    )
+  }
+
+  // Handle selecting a session from history
+  const handleSelectSession = async (sessionId) => {
+    setSessionId(sessionId)
+    setView('upload')
+    
+    // Fetch session details
+    try {
+      const res = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+        headers: {
+          'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous'
+        }
+      })
+      
+      if (res.ok) {
+        const data = await res.json()
+        if (data.summary) {
+          setAnalysis({
+            session_id: sessionId,
+            summary: data.summary,
+            feedback: [],
+            frame_count: 0
+          })
+        }
+        if (data.messages) {
+          setMessages(data.messages.map(m => ({
+            role: m.role,
+            content: m.content
+          })))
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load session:', err)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-cyan-50">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
         {/* Header */}
-        <header className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">
-            🏊‍♂️ SwimCoach AI
-          </h1>
-          <p className="text-gray-600">
-            Upload a swimming video and get personalized coaching feedback
-          </p>
+        <header className="mb-8 flex justify-between items-start">
+          <div>
+            <h1 className="text-4xl font-bold text-gray-800 mb-2">
+              🏊‍♂️ SwimCoach AI
+            </h1>
+            <p className="text-gray-600">
+              Upload a swimming video and get personalized coaching feedback
+            </p>
+          </div>
+          <SignedIn>
+            <div className="flex items-center gap-4">
+              <UserButton afterSignOutUrl="/" />
+            </div>
+          </SignedIn>
         </header>
+        
+        {/* Sign In Prompt */}
+        <SignedOut>
+          <div className="bg-white rounded-lg shadow-lg p-8 text-center max-w-md mx-auto">
+            <h2 className="text-2xl font-bold mb-4">Sign In to Continue</h2>
+            <p className="text-gray-600 mb-6">
+              Sign in to upload videos, get AI coaching feedback, and track your progress over time.
+            </p>
+            <SignIn routing="hash" />
+          </div>
+        </SignedOut>
+        
+        <SignedIn>
+        {/* Navigation Tabs */}
+        <div className="mb-6 flex gap-2">
+          <button
+            onClick={() => setView('upload')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              view === 'upload'
+                ? 'bg-blue-600 text-white'
+                : 'bg-white text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            New Analysis
+          </button>
+          <button
+            onClick={() => setView('history')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              view === 'history'
+                ? 'bg-blue-600 text-white'
+                : 'bg-white text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            My Sessions
+          </button>
+        </div>
+        
+        {/* Session History View */}
+        {view === 'history' && (
+          <SessionHistory onSelectSession={handleSelectSession} />
+        )}
+        
+        {/* Upload/Analysis View */}
+        {view === 'upload' && (
+        <>
 
         {/* API Key Section */}
         {showApiKeyInput && (
@@ -472,6 +579,9 @@ function App() {
         <footer className="mt-12 text-center text-gray-600 text-sm">
           <p>SwimCoach AI • Powered by Claude • {frames.length > 0 && `${frames.length} frames extracted`}</p>
         </footer>
+        </>
+        )}
+        </SignedIn>
       </div>
     </div>
   )

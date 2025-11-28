@@ -69,6 +69,9 @@ CREATE OR REPLACE TABLE coaching_sessions (
     video_id VARCHAR(36) REFERENCES videos(video_id),
     analysis_id VARCHAR(36) REFERENCES analyses(analysis_id),
     
+    -- User identification (from Clerk)
+    user_id VARCHAR(255),  -- Clerk user ID
+    
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     
@@ -78,6 +81,9 @@ CREATE OR REPLACE TABLE coaching_sessions (
     CONSTRAINT fk_video_session FOREIGN KEY (video_id) REFERENCES videos(video_id),
     CONSTRAINT fk_analysis FOREIGN KEY (analysis_id) REFERENCES analyses(analysis_id)
 );
+
+-- Index for faster user session queries
+CREATE INDEX idx_coaching_sessions_user_id ON coaching_sessions(user_id);
 
 -- Conversation messages within a session
 CREATE OR REPLACE TABLE messages (

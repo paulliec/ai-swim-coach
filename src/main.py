@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .api.routes import analysis, health, sessions
+from .api.routes import analysis, health, sessions, users
 from .config.settings import get_settings
 
 # Configure logging
@@ -151,6 +151,12 @@ def create_app() -> FastAPI:
         sessions.router,
         prefix="/api/v1/sessions",
         tags=["Sessions"],
+    )
+    
+    app.include_router(
+        users.router,
+        prefix="/api/v1/users",
+        tags=["Users"],
     )
     
     # Root endpoint
