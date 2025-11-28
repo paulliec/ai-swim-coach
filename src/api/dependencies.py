@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # API Key security scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+# Global mock instances (shared across requests for testing)
+_mock_storage_client = None
+_mock_snowflake_connection = None
+
 
 # ---------------------------------------------------------------------------
 # Authentication
@@ -122,13 +126,22 @@ def get_session_repository(
     4. Close connection (cleanup after request)
     
     FastAPI automatically handles the generator lifecycle.
+    
+    In mock mode, we reuse the same connection across requests
+    so that data persists during the testing session.
     """
+    global _mock_snowflake_connection
+    
     if settings.snowflake_mock_mode:
-        # Use mock connection
-        with create_snowflake_connection(mock_mode=True) as conn:
-            repo = SessionRepository(conn)
-            logger.debug("Created SessionRepository with mock connection")
-            yield repo
+        # Use shared mock connection (persists across requests)
+        if _mock_snowflake_connection is None:
+            from ..infrastructure.snowflake.client import MockSnowflakeConnection
+            _mock_snowflake_connection = MockSnowflakeConnection()
+            logger.info("Created shared mock Snowflake connection for session")
+        
+        repo = SessionRepository(_mock_snowflake_connection)
+        logger.debug("Using shared mock Snowflake connection")
+        yield repo
     else:
         # Use real Snowflake connection
         config = SnowflakeConfig(
@@ -154,11 +167,19 @@ def get_storage_client(
     Provide storage client for frame uploads/downloads.
     
     Returns either R2 client or mock client based on settings.
-    The client is lightweight enough to create per request.
+    
+    In mock mode, we reuse the same client across requests
+    so that uploaded frames persist during the testing session.
     """
+    global _mock_storage_client
+    
     if settings.r2_mock_mode:
-        client = create_storage_client(mock_mode=True)
-        logger.debug("Created mock storage client")
+        # Use shared mock client (persists across requests)
+        if _mock_storage_client is None:
+            _mock_storage_client = create_storage_client(mock_mode=True)
+            logger.info("Created shared mock storage client for session")
+        logger.debug("Using shared mock storage client")
+        return _mock_storage_client
     else:
         config = StorageConfig(
             access_key_id=settings.r2_access_key_id,
