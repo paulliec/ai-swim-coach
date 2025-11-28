@@ -43,8 +43,9 @@ npm run preview
 
 ## Usage
 
-1. **Enter API Key**
-   - Use `dev-key-1` for testing
+1. **API Key (Optional Setup)**
+   - Add `VITE_API_KEY=dev-key-1` to `.env.local` to skip manual entry
+   - Otherwise, enter `dev-key-1` in the UI
    - Key is saved to localStorage
 
 2. **Select Video**

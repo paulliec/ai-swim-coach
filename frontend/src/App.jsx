@@ -8,8 +8,9 @@ const API_BASE = '/api/v1'
 function App() {
   const { user, isLoaded } = useUser()
   
-  // API Key
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('swimcoach_api_key') || '')
+  // API Key - use from localStorage, then env var, then empty
+  const defaultApiKey = localStorage.getItem('swimcoach_api_key') || import.meta.env.VITE_API_KEY || ''
+  const [apiKey, setApiKey] = useState(defaultApiKey)
   const [showApiKeyInput, setShowApiKeyInput] = useState(!apiKey)
   
   // View state
