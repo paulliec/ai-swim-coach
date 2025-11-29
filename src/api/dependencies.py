@@ -147,7 +147,8 @@ def get_session_repository(
         config = SnowflakeConfig(
             account=settings.snowflake_account,
             user=settings.snowflake_user,
-            password=settings.snowflake_password,
+            password=settings.snowflake_password or None,
+            private_key_path=settings.snowflake_private_key_path,
             database=settings.snowflake_database,
             schema=settings.snowflake_schema,
             warehouse=settings.snowflake_warehouse,

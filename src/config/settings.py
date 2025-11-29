@@ -64,6 +64,10 @@ class Settings(BaseSettings):
         default="",
         description="Snowflake service account password"
     )
+    snowflake_private_key_path: Optional[str] = Field(
+        default=None,
+        description="Path to RSA private key file for key-pair authentication"
+    )
     snowflake_database: str = Field(
         default="SWIMCOACH",
         description="Snowflake database name"
@@ -178,13 +182,14 @@ class Settings(BaseSettings):
             missing.append("ANTHROPIC_API_KEY")
         
         # Snowflake only required if not in mock mode
-        if not self.snowflake_mock_mode:
+        if not self.snowflake_mock_mode and not self.snowflake_private_key_path:
             if not self.snowflake_account:
                 missing.append("SNOWFLAKE_ACCOUNT")
             if not self.snowflake_user:
                 missing.append("SNOWFLAKE_USER")
-            if not self.snowflake_password:
-                missing.append("SNOWFLAKE_PASSWORD")
+            # Need either password or private key
+            if not self.snowflake_password and not self.snowflake_private_key_path:
+                missing.append("SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH")
         
         # R2 only required if not in mock mode
         if not self.r2_mock_mode:

@@ -7,12 +7,12 @@ import './index.css'
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
 if (!clerkPubKey) {
-  console.warn('Missing Clerk Publishable Key. Authentication will not work.')
+  throw new Error('Missing VITE_CLERK_PUBLISHABLE_KEY - add it to frontend/.env.local')
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <ClerkProvider publishableKey={clerkPubKey || ''}>
+    <ClerkProvider publishableKey={clerkPubKey}>
       <App />
     </ClerkProvider>
   </React.StrictMode>,

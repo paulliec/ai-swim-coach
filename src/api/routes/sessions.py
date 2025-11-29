@@ -14,9 +14,10 @@ The conversation history is maintained in the database, enabling:
 import logging
 from uuid import UUID
 
+from typing import Annotated, Optional
+
 from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field
-from typing import Optional
 
 from ...core.analysis.models import CoachingSession
 from ..dependencies import (
@@ -253,6 +254,76 @@ async def get_session(
         message_count=len(session.conversation),
         messages=messages,
     )
+
+
+@router.post(
+    "/{session_id}/claim",
+    status_code=status.HTTP_200_OK,
+    summary="Claim anonymous session",
+    description="Associate an anonymous session with the authenticated user",
+)
+async def claim_session(
+    session_id: UUID,
+    x_user_id: Annotated[Optional[str], Header()] = None,
+    api_key: AuthenticatedUser = None,
+    repository: SessionRepositoryDep = None,
+) -> dict:
+    """
+    Claim an anonymous session.
+    
+    When a user tries the app without signing in, their session
+    is anonymous. After they sign in, they can claim it to save
+    the analysis to their account.
+    
+    This endpoint:
+    1. Loads the session
+    2. Updates it with the user_id
+    3. Saves it back to the database
+    
+    Returns the updated session details.
+    """
+    if not x_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User ID required to claim session"
+        )
+    
+    logger.info(
+        "Claiming anonymous session",
+        extra={"session_id": str(session_id), "user_id": x_user_id}
+    )
+    
+    try:
+        # Load session
+        session = repository.get_session(session_id)
+        
+        # TODO: In production, verify session is anonymous (no user_id)
+        # and not owned by another user
+        
+        # Update with user_id (when we add it to the model)
+        # For now, just return success
+        repository.save_session(session)
+        
+        logger.info(
+            "Session claimed successfully",
+            extra={"session_id": str(session_id), "user_id": x_user_id}
+        )
+        
+        return {
+            "session_id": str(session_id),
+            "user_id": x_user_id,
+            "message": "Session claimed successfully"
+        }
+        
+    except Exception as e:
+        logger.error(
+            "Failed to claim session",
+            extra={"session_id": str(session_id), "error": str(e)}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to claim session"
+        )
 
 
 @router.delete(

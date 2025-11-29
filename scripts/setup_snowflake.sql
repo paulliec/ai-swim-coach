@@ -49,6 +49,9 @@ CREATE OR REPLACE TABLE analyses (
     -- What the AI observed
     stroke_type VARCHAR(50),
     summary TEXT,
+    -- VARIANT columns: Store JSON data
+    -- NOTE: snowflake-connector-python returns VARIANT as JSON strings
+    --       Application code must parse with json.loads() before accessing
     observations VARIANT,  -- Array of observation objects
     feedback VARIANT,      -- Array of feedback objects with priorities
     

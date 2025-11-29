@@ -25,10 +25,42 @@ class SnowflakeConnectionError(Exception):
     pass
 
 
+def _load_private_key(key_path: str):
+    """
+    Load private key from file for key-pair authentication.
+    
+    Snowflake requires the private key as a bytes object, not a file path.
+    This function reads the key file and returns it in the format
+    snowflake-connector expects.
+    """
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    
+    with open(key_path, 'rb') as key_file:
+        private_key = serialization.load_pem_private_key(
+            key_file.read(),
+            password=None,  # No password on the key
+            backend=default_backend()
+        )
+    
+    # Convert to the format Snowflake expects
+    private_key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    
+    return private_key_bytes
+
+
 @contextmanager
 def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConnection, None, None]:
     """
     Provide Snowflake connection with automatic cleanup.
+    
+    Supports both password and key-pair authentication:
+    - If private_key_path is set, uses key-pair auth
+    - Otherwise, uses password auth
     
     Using a context manager ensures connections are always closed,
     even if an exception occurs. This prevents connection leaks which
@@ -50,17 +82,30 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
     
     conn = None
     try:
-        conn = snowflake.connector.connect(
-            account=config.account,
-            user=config.user,
-            password=config.password,
-            database=config.database,
-            schema=config.schema,
-            warehouse=config.warehouse,
-            role=config.role,
-            # Connection pool settings
-            client_session_keep_alive=True,
-        )
+        # Build connection parameters
+        connect_params = {
+            'account': config.account,
+            'user': config.user,
+            'database': config.database,
+            'schema': config.schema,
+            'warehouse': config.warehouse,
+            'role': config.role,
+            'client_session_keep_alive': True,
+        }
+        
+        # Use key-pair auth if private key path is provided
+        if config.private_key_path:
+            logger.info("Using key-pair authentication for Snowflake")
+            connect_params['private_key'] = _load_private_key(config.private_key_path)
+        elif config.password:
+            logger.info("Using password authentication for Snowflake")
+            connect_params['password'] = config.password
+        else:
+            raise SnowflakeConnectionError(
+                "Either password or private_key_path must be provided"
+            )
+        
+        conn = snowflake.connector.connect(**connect_params)
         
         logger.debug(
             "Established Snowflake connection",
@@ -411,4 +456,3 @@ def create_snowflake_connection(
         
         with get_snowflake_connection(config) as conn:
             yield conn
-

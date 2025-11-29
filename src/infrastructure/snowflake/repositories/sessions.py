@@ -51,7 +51,8 @@ class SnowflakeConfig:
     """Configuration for Snowflake connection."""
     account: str
     user: str
-    password: str
+    password: Optional[str] = None
+    private_key_path: Optional[str] = None
     database: str = "SWIMCOACH"
     schema: str = "COACHING"
     warehouse: str = "COMPUTE_WH"
@@ -438,13 +439,64 @@ class SessionRepository:
             updated_at=row[2],
         )
     
+    def _parse_variant_json(self, variant_data):
+        """
+        Parse Snowflake VARIANT data that might be a string or already parsed.
+        
+        Snowflake's VARIANT type behavior varies by driver and context:
+        - snowflake-connector-python: Returns VARIANT as JSON string
+        - snowflake-sqlalchemy: May return parsed dict/list
+        - Mock implementation: Returns None or parsed data
+        
+        This helper ensures we handle all cases consistently.
+        
+        Args:
+            variant_data: VARIANT column value (string, dict, list, or None)
+        
+        Returns:
+            Parsed Python object (dict or list), or None if empty
+        """
+        if not variant_data:
+            return None
+        
+        # If it's a string, parse it
+        if isinstance(variant_data, str):
+            try:
+                return json.loads(variant_data)
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Failed to parse VARIANT JSON string",
+                    extra={"variant_data": variant_data[:100], "error": str(e)}
+                )
+                return None
+        
+        # Already parsed (dict or list)
+        return variant_data
+    
     def _parse_observations(self, obs_json) -> list[TechniqueObservation]:
-        """Parse observations from JSON."""
-        if not obs_json:
+        """Parse observations from Snowflake VARIANT column."""
+        # Parse VARIANT data (handles both string and dict/list)
+        obs_data = self._parse_variant_json(obs_json)
+        
+        if not obs_data:
+            return []
+        
+        # Validate it's a list
+        if not isinstance(obs_data, list):
+            logger.warning(
+                "Observations data is not a list after parsing",
+                extra={"type": type(obs_data)}
+            )
             return []
         
         observations = []
-        for obs in obs_json:
+        for obs in obs_data:
+            # Defensive: handle nested string (shouldn't happen but be safe)
+            if isinstance(obs, str):
+                obs = self._parse_variant_json(obs)
+                if not obs:
+                    continue
+            
             observations.append(TechniqueObservation(
                 category=TechniqueCategory(obs.get("category", "body_position")),
                 description=obs.get("description", ""),
@@ -452,12 +504,29 @@ class SessionRepository:
         return observations
     
     def _parse_feedback(self, fb_json) -> list[CoachingFeedback]:
-        """Parse feedback from JSON."""
-        if not fb_json:
+        """Parse feedback from Snowflake VARIANT column."""
+        # Parse VARIANT data (handles both string and dict/list)
+        fb_data = self._parse_variant_json(fb_json)
+        
+        if not fb_data:
+            return []
+        
+        # Validate it's a list
+        if not isinstance(fb_data, list):
+            logger.warning(
+                "Feedback data is not a list after parsing",
+                extra={"type": type(fb_data)}
+            )
             return []
         
         feedback = []
-        for fb in fb_json:
+        for fb in fb_data:
+            # Defensive: handle nested string (shouldn't happen but be safe)
+            if isinstance(fb, str):
+                fb = self._parse_variant_json(fb)
+                if not fb:
+                    continue
+            
             obs_data = fb.get("observation", {})
             feedback.append(CoachingFeedback(
                 id=UUID(fb["id"]) if fb.get("id") else None,
