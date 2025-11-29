@@ -29,6 +29,7 @@ from ..infrastructure.snowflake.repositories.sessions import (
     SessionRepository,
     SnowflakeConfig,
 )
+from ..infrastructure.snowflake.repositories.usage_limits import UsageLimitRepository
 from ..infrastructure.storage.client import StorageClient, StorageConfig, create_storage_client
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,51 @@ def get_session_repository(
             yield repo
 
 
+def get_usage_limit_repository(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Generator[UsageLimitRepository, None, None]:
+    """
+    Provide UsageLimitRepository for rate limiting.
+    
+    Like SessionRepository, this uses the same Snowflake connection
+    strategy: shared mock for testing, real connection for production.
+    
+    Why separate from SessionRepository:
+    - Different concerns (rate limiting vs session data)
+    - Could be moved to Redis later for better performance
+    - Keeps repository responsibilities focused
+    """
+    global _mock_snowflake_connection
+    
+    if settings.snowflake_mock_mode:
+        # Use shared mock connection (same as SessionRepository)
+        if _mock_snowflake_connection is None:
+            from ..infrastructure.snowflake.client import MockSnowflakeConnection
+            _mock_snowflake_connection = MockSnowflakeConnection()
+            logger.info("Created shared mock Snowflake connection for usage limits")
+        
+        repo = UsageLimitRepository(_mock_snowflake_connection)
+        logger.debug("Using shared mock Snowflake connection for usage limits")
+        yield repo
+    else:
+        # Use real Snowflake connection
+        config = SnowflakeConfig(
+            account=settings.snowflake_account,
+            user=settings.snowflake_user,
+            password=settings.snowflake_password or None,
+            private_key_path=settings.snowflake_private_key_path,
+            database=settings.snowflake_database,
+            schema=settings.snowflake_schema,
+            warehouse=settings.snowflake_warehouse,
+            role=settings.snowflake_role,
+        )
+        
+        with create_snowflake_connection(config=config) as conn:
+            repo = UsageLimitRepository(conn)
+            logger.debug("Created UsageLimitRepository with Snowflake connection")
+            yield repo
+
+
 def get_storage_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> StorageClient:
@@ -202,6 +248,7 @@ def get_storage_client(
 AuthenticatedUser = Annotated[str, Depends(verify_api_key)]
 SwimCoachDep = Annotated[SwimCoach, Depends(get_swim_coach)]
 SessionRepositoryDep = Annotated[SessionRepository, Depends(get_session_repository)]
+UsageLimitRepositoryDep = Annotated[UsageLimitRepository, Depends(get_usage_limit_repository)]
 StorageClientDep = Annotated[StorageClient, Depends(get_storage_client)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 

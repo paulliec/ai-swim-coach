@@ -280,7 +280,7 @@ function App() {
         
         // Handle specific error codes
         if (analyzeRes.status === 429) {
-          errorMessage = 'High demand right now. Please try again in a few minutes.'
+          errorMessage = "You've reached your daily limit of 3 analyses. Come back tomorrow!"
         } else if (analyzeRes.status === 500) {
           errorMessage = 'Something went wrong on our end. Please try again.'
         } else {
@@ -325,6 +325,11 @@ function App() {
     // Add user message immediately
     const userMsg = { role: 'user', content: chatInput }
     setMessages(prev => [...prev, userMsg])
+    
+    // Add temporary "thinking" message
+    const thinkingMsg = { role: 'assistant', content: 'Thinking...', isThinking: true }
+    setMessages(prev => [...prev, thinkingMsg])
+    
     setChatInput('')
     
     try {
@@ -361,13 +366,15 @@ function App() {
       
       const data = await res.json()
       
-      // Add assistant response
+      // Replace "thinking" message with actual response
       const assistantMsg = { role: 'assistant', content: data.assistant_message }
-      setMessages(prev => [...prev, assistantMsg])
+      setMessages(prev => prev.filter(m => !m.isThinking).concat(assistantMsg))
       
     } catch (err) {
       setError(err.message)
       console.error(err)
+      // Remove "thinking" message on error
+      setMessages(prev => prev.filter(m => !m.isThinking))
     } finally {
       setChatting(false)
     }
@@ -569,18 +576,6 @@ function App() {
                 </div>
               )}
 
-              {!showApiKeyInput && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-6 flex items-center justify-between">
-                  <span className="text-green-700">✓ API key configured</span>
-                  <button
-                    onClick={() => setShowApiKeyInput(true)}
-                    className="text-sm text-blue-600 hover:underline"
-                  >
-                    Change
-                  </button>
-                </div>
-              )}
-
               {/* Error Display */}
               {error && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-start justify-between">
@@ -766,7 +761,7 @@ function App() {
                         }`}
                       >
                         <p className="text-sm font-semibold mb-1">
-                          {msg.role === 'user' ? 'You' : '🏊‍♂️ Coach'}
+                          {msg.role === 'user' ? 'You' : 'Coach'}
                         </p>
                         <p className="text-gray-800 whitespace-pre-wrap">{msg.content}</p>
                       </div>

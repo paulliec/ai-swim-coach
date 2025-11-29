@@ -138,6 +138,41 @@ LEFT JOIN videos v ON s.video_id = v.video_id
 GROUP BY 1, 2, 3, 4;
 
 -- ---------------------------------------------------------------------------
+-- Usage Limits Table (Rate Limiting)
+-- ---------------------------------------------------------------------------
+
+/*
+Track usage limits for rate limiting.
+Prevents abuse by limiting analyses per user/IP per day.
+*/
+
+CREATE OR REPLACE TABLE usage_limits (
+    limit_id VARCHAR(36) PRIMARY KEY,
+    
+    -- Identifier (user_id from Clerk, or IP address for anonymous)
+    identifier VARCHAR(255) NOT NULL,
+    identifier_type VARCHAR(20) NOT NULL, -- 'user_id' or 'ip_address'
+    
+    -- Usage tracking
+    resource_type VARCHAR(50) NOT NULL,  -- 'video_analysis'
+    usage_count INT NOT NULL DEFAULT 0,
+    limit_max INT NOT NULL,  -- Max allowed per period
+    
+    -- Time period tracking
+    period_start TIMESTAMP_NTZ NOT NULL,
+    period_end TIMESTAMP_NTZ NOT NULL,
+    
+    -- Metadata
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Index for fast lookups
+CREATE INDEX idx_usage_limits_lookup ON usage_limits(identifier, identifier_type, resource_type, period_start);
+
+COMMENT ON TABLE usage_limits IS 'Rate limiting: track resource usage per user/IP per time period';
+
+-- ---------------------------------------------------------------------------
 -- Stored Procedures
 -- ---------------------------------------------------------------------------
 

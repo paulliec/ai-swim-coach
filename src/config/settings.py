@@ -32,6 +32,14 @@ class Settings(BaseSettings):
         default="dev-key-1,dev-key-2",
         description="Comma-separated API keys. Using a list enables key rotation without downtime."
     )
+    rate_limit_bypass_keys: str = Field(
+        default="",
+        description="Comma-separated API keys that bypass rate limiting. For trusted users/admins."
+    )
+    rate_limit_bypass_emails: str = Field(
+        default="",
+        description="Comma-separated email addresses (from Clerk user ID) that bypass rate limiting."
+    )
     
     # Anthropic Configuration
     anthropic_api_key: str = Field(
@@ -147,6 +155,16 @@ class Settings(BaseSettings):
     def api_keys_list(self) -> list[str]:
         """Parse comma-separated API keys into a list."""
         return [key.strip() for key in self.api_keys.split(",") if key.strip()]
+    
+    @property
+    def rate_limit_bypass_keys_list(self) -> list[str]:
+        """Parse comma-separated bypass API keys into a list."""
+        return [key.strip() for key in self.rate_limit_bypass_keys.split(",") if key.strip()]
+    
+    @property
+    def rate_limit_bypass_emails_list(self) -> list[str]:
+        """Parse comma-separated bypass emails into a list."""
+        return [email.strip().lower() for email in self.rate_limit_bypass_emails.split(",") if email.strip()]
     
     @property
     def cors_origins_list(self) -> list[str]:

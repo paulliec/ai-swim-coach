@@ -16,7 +16,7 @@ import logging
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from typing import Optional
 
@@ -33,6 +33,7 @@ from ..dependencies import (
     SettingsDep,
     StorageClientDep,
     SwimCoachDep,
+    UsageLimitRepositoryDep,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,21 +263,31 @@ async def upload_frames(
 )
 async def analyze_session(
     session_id: UUID,
-    request: AnalysisRequest,
+    analysis_request: AnalysisRequest,
+    fastapi_request: Request,
     x_user_id: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
+    settings: SettingsDep = None,
     coach: SwimCoachDep = None,
     storage: StorageClientDep = None,
     repository: SessionRepositoryDep = None,
+    usage_limit_repo: UsageLimitRepositoryDep = None,
 ) -> AnalysisResponse:
     """
     Analyze frames and generate coaching feedback.
     
     This is the expensive operation - it:
-    1. Loads frames from storage
-    2. Sends them to Claude for analysis
-    3. Parses the response into structured feedback
-    4. Saves results to database
+    1. Checks rate limits (3 per day per user/IP, unless bypassed)
+    2. Loads frames from storage
+    3. Sends them to Claude for analysis
+    4. Parses the response into structured feedback
+    5. Saves results to database
+    
+    Rate Limiting:
+    - Default: 3 analyses per day per user (Clerk ID) or IP address
+    - Bypass: API keys in RATE_LIMIT_BYPASS_KEYS skip rate limiting
+    - Future: Email addresses in RATE_LIMIT_BYPASS_EMAILS will also bypass
     
     The analysis can take 10-30 seconds depending on:
     - Number of frames
@@ -292,9 +303,61 @@ async def analyze_session(
         "Starting analysis",
         extra={
             "session_id": str(session_id),
-            "stroke_type": request.stroke_type.value,
+            "stroke_type": analysis_request.stroke_type.value,
         }
     )
+    
+    # Check if API key bypasses rate limiting
+    bypass_rate_limit = False
+    if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
+        bypass_rate_limit = True
+        logger.info(
+            "Rate limit bypassed: trusted API key",
+            extra={"api_key_prefix": x_api_key[:8] + "..." if len(x_api_key) > 8 else x_api_key}
+        )
+    
+    # Check rate limits (3 analyses per day per user/IP) unless bypassed
+    if not bypass_rate_limit:
+        # Use user ID if authenticated, otherwise use IP address
+        if x_user_id:
+            identifier = x_user_id
+            identifier_type = "user_id"
+        else:
+            # Get client IP from request
+            identifier = fastapi_request.client.host if fastapi_request.client else "unknown"
+            identifier_type = "ip_address"
+        
+        allowed, current_count, limit_max = usage_limit_repo.check_and_increment(
+            identifier=identifier,
+            identifier_type=identifier_type,
+            resource_type="video_analysis",
+            limit_max=3,  # 3 analyses per day
+            period_hours=24
+        )
+        
+        if not allowed:
+            logger.warning(
+                "Rate limit exceeded",
+                extra={
+                    "identifier": identifier,
+                    "identifier_type": identifier_type,
+                    "current_count": current_count,
+                    "limit": limit_max
+                }
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"You've reached your daily limit of {limit_max} analyses. Come back tomorrow!"
+            )
+        
+        logger.info(
+            "Rate limit check passed",
+            extra={
+                "identifier": identifier,
+                "count": current_count,
+                "limit": limit_max
+            }
+        )
     
     # Load session
     try:
@@ -364,8 +427,8 @@ async def analyze_session(
         
         analysis = await coach.analyze_video(
             frames=frames,
-            stroke_type=request.stroke_type,
-            user_notes=request.user_notes,
+            stroke_type=analysis_request.stroke_type,
+            user_notes=analysis_request.user_notes,
         )
         
         # Update session with analysis

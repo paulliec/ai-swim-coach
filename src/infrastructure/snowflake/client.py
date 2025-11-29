@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 from uuid import UUID
 
+from fastapi import HTTPException
+
 from .repositories.sessions import SnowflakeConfig, SnowflakeConnection
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,11 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
         
         yield conn
         
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 429 rate limits) without wrapping
+        # These are application-level responses, not database errors
+        raise
+    
     except snowflake.connector.errors.DatabaseError as e:
         logger.error(
             "Snowflake connection failed",
@@ -227,6 +234,14 @@ class MockSnowflakeCursor:
         elif 'INSERT INTO' in query_upper:
             self._handle_insert(query_upper, params)
         
+        # Handle UPDATE queries
+        elif query_upper.startswith('UPDATE'):
+            self._handle_update(query_upper, params)
+        
+        # Handle DELETE queries
+        elif query_upper.startswith('DELETE'):
+            self._handle_delete(query_upper, params)
+        
         return self
     
     def _handle_merge(self, query: str, params: Optional[tuple]) -> None:
@@ -318,6 +333,49 @@ class MockSnowflakeCursor:
         elif 'FROM MESSAGES' in query:
             session_id = str(params[0]) if params else None
             self._results = []  # No messages by default
+        
+        # Get usage limits
+        elif 'FROM USAGE_LIMITS' in query:
+            if len(params) >= 3:
+                # Query by identifier, type, and resource
+                identifier = str(params[0])
+                identifier_type = str(params[1])
+                resource_type = str(params[2])
+                
+                # Find matching records
+                for record in self._storage['usage_limits'].values():
+                    record_params = record['params']
+                    # Params: (limit_id, identifier, identifier_type, resource_type,
+                    #          usage_count, limit_max, period_start, period_end)
+                    if (str(record_params[1]) == identifier and
+                        str(record_params[2]) == identifier_type and
+                        str(record_params[3]) == resource_type):
+                        # Check if period matches (params[3] and params[4] are period_start and period_end if provided)
+                        if len(params) == 5:
+                            if (record_params[6] == params[3] and
+                                record_params[7] == params[4]):
+                                # Return: (limit_id, usage_count, limit_max)
+                                self._results = [(
+                                    record_params[0],  # limit_id
+                                    record_params[4],  # usage_count
+                                    record_params[5],  # limit_max
+                                )]
+                                return
+                        else:
+                            # For get_current_usage query: check if period_end > now
+                            if len(params) == 4:
+                                # params[3] is 'now' for comparison
+                                # For simplicity in mock, just return the first match
+                                self._results = [(
+                                    record_params[4],  # usage_count
+                                    record_params[5],  # limit_max
+                                    record_params[7],  # period_end
+                                )]
+                                return
+                
+                self._results = []
+            else:
+                self._results = []
     
     def _handle_insert(self, query: str, params: Optional[tuple]) -> None:
         """Handle INSERT queries."""
@@ -332,6 +390,78 @@ class MockSnowflakeCursor:
                 'params': params,
             }
             self._rowcount = 1
+        
+        elif 'USAGE_LIMITS' in query:
+            table = 'usage_limits'
+            limit_id = str(params[0])
+            # Store the full params tuple for usage_limits
+            # Format: (limit_id, identifier, identifier_type, resource_type, 
+            #          usage_count, limit_max, period_start, period_end)
+            self._storage[table][limit_id] = {
+                'limit_id': limit_id,
+                'params': params,
+            }
+            self._rowcount = 1
+    
+    def _handle_update(self, query: str, params: Optional[tuple]) -> None:
+        """Handle UPDATE queries."""
+        if not params:
+            return
+        
+        if 'USAGE_LIMITS' in query:
+            # For UPDATE usage_limits, params are: (new_usage_count, limit_id)
+            new_count = params[0]
+            limit_id = str(params[1])
+            
+            if limit_id in self._storage['usage_limits']:
+                record = self._storage['usage_limits'][limit_id]
+                # Update the usage count in the stored params
+                old_params = record['params']
+                # Params format: (limit_id, identifier, identifier_type, resource_type,
+                #                 usage_count, limit_max, period_start, period_end)
+                new_params = (
+                    old_params[0],  # limit_id
+                    old_params[1],  # identifier
+                    old_params[2],  # identifier_type
+                    old_params[3],  # resource_type
+                    new_count,      # usage_count (updated)
+                    old_params[5],  # limit_max
+                    old_params[6],  # period_start
+                    old_params[7],  # period_end
+                )
+                record['params'] = new_params
+                self._rowcount = 1
+            else:
+                self._rowcount = 0
+    
+    def _handle_delete(self, query: str, params: Optional[tuple]) -> None:
+        """Handle DELETE queries."""
+        if not params:
+            return
+        
+        if 'USAGE_LIMITS' in query:
+            # For DELETE usage_limits by identifier
+            # Params: (identifier, identifier_type, resource_type)
+            identifier = str(params[0])
+            identifier_type = str(params[1])
+            resource_type = str(params[2])
+            
+            deleted_count = 0
+            to_delete = []
+            
+            for limit_id, record in self._storage['usage_limits'].items():
+                record_params = record['params']
+                # Check if this record matches
+                if (str(record_params[1]) == identifier and
+                    str(record_params[2]) == identifier_type and
+                    str(record_params[3]) == resource_type):
+                    to_delete.append(limit_id)
+            
+            for limit_id in to_delete:
+                del self._storage['usage_limits'][limit_id]
+                deleted_count += 1
+            
+            self._rowcount = deleted_count
     
     def fetchone(self):
         """Fetch one row from results."""
@@ -373,6 +503,7 @@ class MockSnowflakeConnection:
             'videos': {},
             'analyses': {},
             'messages': {},
+            'usage_limits': {},
         }
         self._committed = True
         
