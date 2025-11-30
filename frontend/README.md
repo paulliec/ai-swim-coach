@@ -41,6 +41,28 @@ npm run build
 npm run preview
 ```
 
+## Configuration
+
+### Environment Variables
+
+Create `.env.local` for local development:
+
+```bash
+# Optional: Backend API URL (defaults to /api/v1 which uses Vite proxy)
+VITE_API_BASE=/api/v1
+
+# Optional: API key (for convenience)
+VITE_API_KEY=dev-key-1
+
+# Required: Clerk authentication
+VITE_CLERK_PUBLISHABLE_KEY=pk_test_your_clerk_key_here
+```
+
+For production deployment:
+- Copy `env.production` to `.env.production`
+- Update `VITE_API_BASE` with your production backend URL
+- Update `VITE_CLERK_PUBLISHABLE_KEY` with production key
+
 ## Usage
 
 1. **API Key (Optional Setup)**
@@ -130,16 +152,47 @@ proxy: {
 
 ## Deployment
 
-### Static Hosting (Netlify, Vercel, etc.)
+### Vercel (Recommended)
+
+1. **Push to GitHub**
+   ```bash
+   git push origin main
+   ```
+
+2. **Connect to Vercel**
+   - Go to https://vercel.com
+   - Import your GitHub repository
+   - Vercel auto-detects Vite configuration
+
+3. **Configure Environment Variables**
+   - Go to Project Settings → Environment Variables
+   - Add for **Production**:
+     - `VITE_API_BASE` = `https://swimcoach-api.fly.dev/api/v1`
+     - `VITE_CLERK_PUBLISHABLE_KEY` = `pk_live_your_production_key`
+
+4. **Deploy**
+   - Vercel automatically deploys on push to `main`
+   - Build command: `npm run build`
+   - Output directory: `dist`
+
+### Netlify
+
+1. **Build Settings**
+   - Build command: `npm run build`
+   - Publish directory: `dist`
+
+2. **Environment Variables**
+   - Add same variables as Vercel above
+
+### Manual Build
 
 ```bash
+# Build for production
 npm run build
-# Deploy the 'dist' folder
-```
 
-Update API URL in production:
-- Set `VITE_API_URL` environment variable
-- Or hardcode in `App.jsx`
+# The dist/ folder contains optimized static files
+# Deploy to any static hosting (S3, Cloudflare Pages, etc.)
+```
 
 ### Docker
 

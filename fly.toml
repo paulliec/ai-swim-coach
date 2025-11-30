@@ -1,0 +1,37 @@
+# fly.toml app configuration file generated for swimcoach-api on 2025-11-30T09:52:21-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'swimcoach-api'
+primary_region = 'ord'
+
+[build]
+
+[env]
+  API_TITLE = 'SwimCoach AI API'
+  API_VERSION = 'v1'
+  PORT = '8080'
+  PYTHONUNBUFFERED = '1'
+  R2_MOCK_MODE = 'false'
+  SNOWFLAKE_MOCK_MODE = 'false'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'suspend'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

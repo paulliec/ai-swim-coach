@@ -223,6 +223,74 @@ Continue coaching conversation. Send follow-up questions, get targeted advice.
 ### GET /api/v1/sessions/{session_id}
 Retrieve session history and all feedback.
 
+## Deployment
+
+### Backend (FastAPI)
+
+Deploy to Fly.io with Docker:
+
+```bash
+# Install Fly.io CLI
+curl -L https://fly.io/install.sh | sh  # Mac/Linux
+# or: pwsh -Command "iwr https://fly.io/install.ps1 -useb | iex"  # Windows
+
+# Login
+fly auth login
+
+# Launch (creates app from fly.toml)
+fly launch --no-deploy
+
+# Set secrets
+fly secrets set ANTHROPIC_API_KEY="sk-ant-..."
+fly secrets set API_KEYS="prod-key-1,prod-key-2"
+# ... (see DEPLOYMENT.md for full list)
+
+# Deploy
+fly deploy
+
+# Monitor
+fly logs
+fly status
+```
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for complete deployment guide.
+
+**Files:**
+- `Dockerfile` - Multi-stage build for production
+- `fly.toml` - Fly.io configuration
+- `.dockerignore` - Excludes frontend and dev files
+
+### Frontend (React)
+
+Deploy to Vercel (recommended):
+
+```bash
+# 1. Push to GitHub
+git push origin main
+
+# 2. Deploy to Vercel
+# - Go to https://vercel.com
+# - Import your GitHub repository
+# - Root directory: ./frontend
+# - Framework: Vite
+# - Build command: npm run build
+# - Output directory: dist
+
+# 3. Set environment variables in Vercel:
+# VITE_API_BASE=https://swimcoach-api.fly.dev/api/v1
+# VITE_CLERK_PUBLISHABLE_KEY=pk_live_your_production_key
+```
+
+**Alternative: Netlify**
+
+```bash
+# Build command: cd frontend && npm run build
+# Publish directory: frontend/dist
+# Environment variables: Same as above
+```
+
+See [frontend/README.md](frontend/README.md) for detailed deployment instructions.
+
 ---
 
 ## Contributing

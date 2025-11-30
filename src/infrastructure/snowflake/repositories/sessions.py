@@ -48,11 +48,20 @@ class SnowflakeConnection(Protocol):
 
 @dataclass
 class SnowflakeConfig:
-    """Configuration for Snowflake connection."""
+    """
+    Configuration for Snowflake connection.
+    
+    Supports both password and key-pair authentication:
+    - Password auth: Set password
+    - Key-pair auth: Set either private_key_path (file) or private_key_base64 (env var)
+    
+    For deployment (Fly.io, etc.), prefer private_key_base64 over private_key_path.
+    """
     account: str
     user: str
     password: Optional[str] = None
     private_key_path: Optional[str] = None
+    private_key_base64: Optional[str] = None
     database: str = "SWIMCOACH"
     schema: str = "COACHING"
     warehouse: str = "COMPUTE_WH"

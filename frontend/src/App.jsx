@@ -3,7 +3,8 @@ import { SignIn, UserButton, useUser, SignedIn, SignedOut } from '@clerk/clerk-r
 import SessionHistory from './components/SessionHistory'
 
 const STROKE_TYPES = ['freestyle', 'backstroke', 'breaststroke', 'butterfly']
-const API_BASE = '/api/v1'
+// API base URL - uses environment variable for production, defaults to proxy for local dev
+const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
 function App() {
   const { user, isLoaded } = useUser()

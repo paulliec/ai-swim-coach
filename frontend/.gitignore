@@ -9,7 +9,11 @@ node_modules/
 # Production
 dist
 dist-ssr
+
+# Environment files (*.local are user-specific, never commit)
 *.local
+# env.production is a template (commit it)
+# .env.production is user's actual production config (git-ignored by *.local pattern)
 
 # Editor
 .vscode/*

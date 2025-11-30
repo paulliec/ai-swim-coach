@@ -76,6 +76,10 @@ class Settings(BaseSettings):
         default=None,
         description="Path to RSA private key file for key-pair authentication"
     )
+    snowflake_private_key_base64: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded private key (for deployment, alternative to file path)"
+    )
     snowflake_database: str = Field(
         default="SWIMCOACH",
         description="Snowflake database name"
@@ -95,6 +99,10 @@ class Settings(BaseSettings):
     snowflake_mock_mode: bool = Field(
         default=False,
         description="Use in-memory mock instead of real Snowflake connection. Enables local dev without DB."
+    )
+    snowflake_private_key_base64: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded private key (for deployment, alternative to file path)"
     )
     
     # R2/S3 Storage Configuration

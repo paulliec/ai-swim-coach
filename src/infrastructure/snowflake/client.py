@@ -27,25 +27,54 @@ class SnowflakeConnectionError(Exception):
     pass
 
 
-def _load_private_key(key_path: str):
+def _load_private_key(key_path: Optional[str] = None, key_base64: Optional[str] = None):
     """
-    Load private key from file for key-pair authentication.
+    Load private key from file path or base64 string.
     
-    Snowflake requires the private key as a bytes object, not a file path.
-    This function reads the key file and returns it in the format
-    snowflake-connector expects.
+    Snowflake requires the private key as a bytes object.
+    
+    This function supports two input methods:
+    - key_path: Read from a file (for local development)
+    - key_base64: Decode from base64 string (for deployment/Fly.io)
+    
+    Why support base64:
+    - Fly.io and other cloud platforms make it easy to set env vars
+    - Harder to securely upload files to ephemeral containers
+    - Base64 encoding preserves the key format in environment variables
+    
+    Args:
+        key_path: Path to PEM-encoded private key file
+        key_base64: Base64-encoded PEM private key string
+    
+    Returns:
+        Private key bytes in DER/PKCS8 format (Snowflake-compatible)
+    
+    Raises:
+        ValueError: If neither key_path nor key_base64 is provided
     """
+    import base64
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import serialization
     
-    with open(key_path, 'rb') as key_file:
-        private_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=None,  # No password on the key
-            backend=default_backend()
-        )
+    # Load key bytes from either source
+    if key_base64:
+        logger.info("Loading private key from base64-encoded environment variable")
+        key_bytes = base64.b64decode(key_base64)
+    elif key_path:
+        logger.info(f"Loading private key from file: {key_path}")
+        with open(key_path, 'rb') as key_file:
+            key_bytes = key_file.read()
+    else:
+        raise ValueError("Either key_path or key_base64 must be provided for key-pair authentication")
     
-    # Convert to the format Snowflake expects
+    # Parse the PEM-encoded key
+    private_key = serialization.load_pem_private_key(
+        key_bytes,
+        password=None,  # No password on the key
+        backend=default_backend()
+    )
+    
+    # Convert to the format Snowflake expects (DER/PKCS8)
     private_key_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
@@ -60,9 +89,12 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
     """
     Provide Snowflake connection with automatic cleanup.
     
-    Supports both password and key-pair authentication:
-    - If private_key_path is set, uses key-pair auth
-    - Otherwise, uses password auth
+    Supports multiple authentication methods:
+    - Key-pair auth (base64): Set private_key_base64 (preferred for deployment)
+    - Key-pair auth (file): Set private_key_path (local development)
+    - Password auth: Set password
+    
+    Priority order: private_key_base64 > private_key_path > password
     
     Using a context manager ensures connections are always closed,
     even if an exception occurs. This prevents connection leaks which
@@ -95,16 +127,19 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
             'client_session_keep_alive': True,
         }
         
-        # Use key-pair auth if private key path is provided
-        if config.private_key_path:
-            logger.info("Using key-pair authentication for Snowflake")
-            connect_params['private_key'] = _load_private_key(config.private_key_path)
+        # Use key-pair auth if private key is provided (base64 or file path)
+        if config.private_key_base64:
+            logger.info("Using key-pair authentication for Snowflake (base64-encoded key)")
+            connect_params['private_key'] = _load_private_key(key_base64=config.private_key_base64)
+        elif config.private_key_path:
+            logger.info("Using key-pair authentication for Snowflake (file path)")
+            connect_params['private_key'] = _load_private_key(key_path=config.private_key_path)
         elif config.password:
             logger.info("Using password authentication for Snowflake")
             connect_params['password'] = config.password
         else:
             raise SnowflakeConnectionError(
-                "Either password or private_key_path must be provided"
+                "Either password, private_key_path, or private_key_base64 must be provided"
             )
         
         conn = snowflake.connector.connect(**connect_params)
