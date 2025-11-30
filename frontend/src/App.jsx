@@ -105,25 +105,62 @@ function App() {
   }
 
   // Extract frames from video file
+  // Helper: Detect if user is on mobile device
+  const isMobileDevice = () => {
+    // Check user agent
+    const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i
+    const isMobileUA = mobileRegex.test(navigator.userAgent)
+    
+    // Check screen width (tablets and phones)
+    const isSmallScreen = window.innerWidth <= 768
+    
+    return isMobileUA || isSmallScreen
+  }
+
   const extractFrames = async (file) => {
     setExtracting(true)
     setError(null)
     
+    const video = document.createElement('video')
+    let objectUrl = null
+    
     try {
-      const video = document.createElement('video')
-      video.src = URL.createObjectURL(file)
+      objectUrl = URL.createObjectURL(file)
+      video.src = objectUrl
       video.muted = true
+      video.playsInline = true  // Important for iOS
+      video.preload = 'auto'
       
-      // Wait for video metadata to load
-      await new Promise((resolve, reject) => {
-        video.onloadedmetadata = resolve
-        video.onerror = reject
-      })
+      // Detect mobile and adjust frame count
+      const isMobile = isMobileDevice()
+      const frameCount = isMobile ? 10 : 15  // Fewer frames on mobile for performance
+      
+      console.log(`Extracting ${frameCount} frames (${isMobile ? 'mobile' : 'desktop'} mode)`)
+      
+      // Wait for video to be fully loaded and ready to play
+      // Use canplaythrough for better mobile compatibility
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          video.onloadedmetadata = () => {
+            // After metadata loads, wait for canplaythrough
+            video.oncanplaythrough = resolve
+            video.onerror = reject
+            video.load()  // Start loading
+          }
+          video.onerror = reject
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Video loading timeout (30s)')), 30000)
+        )
+      ])
       
       const duration = video.duration
-      const frameCount = 15
-      const interval = duration / (frameCount + 1)
       
+      if (!duration || duration === 0 || !isFinite(duration)) {
+        throw new Error('Invalid video duration. The video file may be corrupted.')
+      }
+      
+      const interval = duration / (frameCount + 1)
       const extractedFrames = []
       
       // Extract frames at uniform intervals
@@ -133,22 +170,43 @@ function App() {
         // Seek to timestamp
         video.currentTime = timestamp
         
-        // Wait for seek to complete
-        await new Promise((resolve) => {
-          video.onseeked = resolve
-        })
+        // Wait for seek to complete with timeout
+        await Promise.race([
+          new Promise((resolve) => {
+            video.onseeked = resolve
+          }),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Frame ${i} seek timeout`)), 5000)
+          )
+        ])
+        
+        // Ensure video has rendered the frame (important for iOS)
+        await new Promise(resolve => setTimeout(resolve, 100))
         
         // Draw frame to canvas
         const canvas = document.createElement('canvas')
-        canvas.width = video.videoWidth
-        canvas.height = video.videoHeight
-        const ctx = canvas.getContext('2d')
-        ctx.drawImage(video, 0, 0)
         
-        // Convert to blob
-        const blob = await new Promise((resolve) => {
-          canvas.toBlob(resolve, 'image/jpeg', 0.85)
-        })
+        // Use smaller dimensions on mobile to save memory
+        const scale = isMobile ? 0.75 : 1
+        canvas.width = video.videoWidth * scale
+        canvas.height = video.videoHeight * scale
+        
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        
+        // Convert to blob with timeout
+        const blob = await Promise.race([
+          new Promise((resolve) => {
+            canvas.toBlob(resolve, 'image/jpeg', 0.85)
+          }),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Frame ${i} blob conversion timeout`)), 5000)
+          )
+        ])
+        
+        if (!blob) {
+          throw new Error(`Failed to create blob for frame ${i}`)
+        }
         
         // Create thumbnail
         const thumbnail = canvas.toDataURL('image/jpeg', 0.3)
@@ -162,11 +220,32 @@ function App() {
       }
       
       setFrames(extractedFrames)
-      URL.revokeObjectURL(video.src)
+      console.log(`Successfully extracted ${extractedFrames.length} frames`)
+      
     } catch (err) {
-      setError(`Failed to extract frames: ${err.message}`)
-      console.error(err)
+      console.error('Frame extraction error:', err)
+      
+      // User-friendly error messages
+      let errorMessage = 'Failed to extract frames from video. '
+      
+      if (err.message.includes('timeout')) {
+        errorMessage += 'The video is taking too long to load. Try a smaller video file or check your connection.'
+      } else if (err.message.includes('duration')) {
+        errorMessage += 'The video file appears to be invalid or corrupted.'
+      } else if (err.message.includes('blob')) {
+        errorMessage += 'Your device may be low on memory. Try closing other apps or using a smaller video.'
+      } else {
+        errorMessage += err.message
+      }
+      
+      setError(errorMessage)
+      setFrames([])  // Clear any partial frames
+      
     } finally {
+      // Always cleanup
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl)
+      }
       setExtracting(false)
     }
   }
