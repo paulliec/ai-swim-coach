@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     
     # CORS
     cors_origins: str = Field(
-        default="*",
+        default="http://localhost:3000,https://ai-swim-coach.pages.dev",
         description="Comma-separated list of allowed CORS origins. Use * for development only."
     )
     

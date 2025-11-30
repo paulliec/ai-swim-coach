@@ -125,7 +125,10 @@ def create_app() -> FastAPI:
     )
     
     # CORS middleware
-    # In production, set this to specific origins for security
+    # Configure allowed origins via CORS_ORIGINS environment variable
+    # Default: localhost (dev) + Cloudflare Pages (production)
+    # Production: Set to your actual frontend domain(s)
+    # Example: https://swimcoach.app,https://ai-swim-coach.pages.dev
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,

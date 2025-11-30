@@ -74,6 +74,27 @@ fly secrets set SNOWFLAKE_MOCK_MODE="true"
 fly secrets set R2_MOCK_MODE="true"
 ```
 
+### CORS Configuration
+
+The backend needs to know which frontend domains to allow. Update `fly.toml` with your frontend URL:
+
+```toml
+[env]
+  # Update with your actual frontend domain(s)
+  CORS_ORIGINS = 'https://ai-swim-coach.pages.dev'
+  
+  # For multiple domains (e.g., custom domain + Cloudflare Pages):
+  # CORS_ORIGINS = 'https://swimcoach.app,https://ai-swim-coach.pages.dev'
+```
+
+**Common frontend platforms:**
+- **Cloudflare Pages**: `https://ai-swim-coach.pages.dev`
+- **Vercel**: `https://your-app.vercel.app`
+- **Netlify**: `https://your-app.netlify.app`
+- **Custom domain**: `https://your-domain.com`
+
+**Important:** Don't use `*` (wildcard) in production - it's insecure and disables credentials.
+
 ### Snowflake Key-Pair Authentication (Recommended)
 
 For production, use key-pair authentication instead of passwords for better security.
