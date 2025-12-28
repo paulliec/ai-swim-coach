@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     
     # Application Behavior
     max_frames_per_upload: int = Field(
-        default=20,
+        default=60,
         description="Maximum frames per video upload. Limits API payload size and analysis cost."
     )
     max_upload_size_mb: int = Field(

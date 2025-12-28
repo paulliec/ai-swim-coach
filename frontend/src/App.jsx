@@ -39,6 +39,10 @@ function App() {
   const [chatInput, setChatInput] = useState('')
   const [chatting, setChatting] = useState(false)
   
+  // Frame extraction settings
+  const [framesPerSecond, setFramesPerSecond] = useState(1)
+  const [videoDuration, setVideoDuration] = useState(0)
+  
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
   const messagesEndRef = useRef(null)
@@ -111,7 +115,7 @@ function App() {
     return mobileRegex.test(navigator.userAgent) || window.innerWidth <= 768
   }
 
-  const extractFrames = async (file) => {
+  const extractFrames = async (file, fps = framesPerSecond) => {
     setExtracting(true)
     setError(null)
     
@@ -124,12 +128,6 @@ function App() {
       video.src = objectUrl
       video.muted = true
       video.playsInline = true  // Important for iOS
-      
-      // Detect mobile and adjust frame count
-      const isMobile = isMobileDevice()
-      const frameCount = isMobile ? 10 : 15
-      
-      console.log(`Extracting ${frameCount} frames (${isMobile ? 'mobile' : 'desktop'} mode)`)
       
       // Wait for video metadata to load (with timeout)
       await Promise.race([
@@ -148,6 +146,17 @@ function App() {
         throw new Error('Invalid video duration')
       }
       
+      // Store duration for UI
+      setVideoDuration(duration)
+      
+      // Calculate frame count based on FPS, capped at 60
+      const isMobile = isMobileDevice()
+      const maxFrames = isMobile ? 40 : 60
+      let frameCount = Math.round(duration * fps)
+      frameCount = Math.max(5, Math.min(frameCount, maxFrames)) // Min 5, max 40-60
+      
+      console.log(`Extracting ${frameCount} frames at ${fps} FPS from ${duration.toFixed(1)}s video (${isMobile ? 'mobile' : 'desktop'} mode)`)
+      
       const interval = duration / (frameCount + 1)
       const extractedFrames = []
       
@@ -164,7 +173,7 @@ function App() {
         })
         
         // Small delay for iOS to render the frame
-        if (isMobile) {
+        if (isMobileDevice()) {
           await new Promise(resolve => setTimeout(resolve, 100))
         }
         
@@ -172,7 +181,7 @@ function App() {
         const canvas = document.createElement('canvas')
         
         // Use smaller dimensions on mobile
-        const scale = isMobile ? 0.75 : 1
+        const scale = isMobileDevice() ? 0.75 : 1
         canvas.width = video.videoWidth * scale
         canvas.height = video.videoHeight * scale
         
@@ -314,7 +323,7 @@ function App() {
       // Set a timeout to show "taking longer" message
       const longWaitTimer = setTimeout(() => {
         setAnalyzingLong(true)
-      }, 30000) // 30 seconds
+      }, 60000) // 60 seconds
       
       const analyzeRes = await fetch(`${API_BASE}/analysis/${uploadData.session_id}/analyze`, {
         method: 'POST',
@@ -656,11 +665,11 @@ function App() {
                   <p className="text-center text-blue-900 font-medium">
                     {analyzingLong 
                       ? '⏱️ Taking longer than usual, please wait...' 
-                      : '🤖 Analyzing your technique... this typically takes 10-15 seconds'}
+                      : `🤖 Analyzing your technique... this typically takes 30-60 seconds`}
                   </p>
                   {!analyzingLong && (
                     <p className="text-center text-blue-600 text-sm mt-2">
-                      Our AI coach is reviewing your frames
+                      Our AI coach is reviewing {frames.length} frames
                     </p>
                   )}
                 </div>
@@ -716,6 +725,38 @@ function App() {
                   <h2 className="text-2xl font-semibold mb-4">2. Analysis Settings</h2>
                   
                   <div className="space-y-4">
+                    {/* FPS Selector */}
+                    <div>
+                      <label className="block font-medium mb-2">
+                        Frame Rate: {framesPerSecond} FPS
+                        <span className="text-gray-500 font-normal ml-2">
+                          ({Math.max(5, Math.min(Math.round(videoDuration * framesPerSecond), isMobileDevice() ? 40 : 60))} frames)
+                        </span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="3"
+                        step="0.5"
+                        value={framesPerSecond}
+                        onChange={(e) => {
+                          const newFps = parseFloat(e.target.value)
+                          setFramesPerSecond(newFps)
+                          if (videoFile) {
+                            extractFrames(videoFile, newFps)
+                          }
+                        }}
+                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      />
+                      <div className="flex justify-between text-xs text-gray-500 mt-1">
+                        <span>0.5 (fewer frames)</span>
+                        <span>3 (more detail)</span>
+                      </div>
+                      <p className="text-sm text-gray-600 mt-2">
+                        Higher FPS captures more detail for fast movements (catch, entry). Lower FPS is faster to analyze.
+                      </p>
+                    </div>
+                    
                     <div>
                       <label className="block font-medium mb-2">Stroke Type</label>
                       <select
@@ -752,7 +793,7 @@ function App() {
                         : analyzing 
                           ? analyzingLong 
                             ? '⏱️ Still analyzing, please wait...'
-                            : '🤖 Analyzing with AI (10-15s)...'
+                            : '🤖 Analyzing with AI (30-60s)...'
                           : '🎯 Analyze My Technique'}
                     </button>
                   </div>
