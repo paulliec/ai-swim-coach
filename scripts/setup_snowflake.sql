@@ -173,6 +173,46 @@ CREATE INDEX idx_usage_limits_lookup ON usage_limits(identifier, identifier_type
 COMMENT ON TABLE usage_limits IS 'Rate limiting: track resource usage per user/IP per time period';
 
 -- ---------------------------------------------------------------------------
+-- RAG Knowledge Base (Coaching Content)
+-- ---------------------------------------------------------------------------
+
+/*
+Stores curated swimming technique knowledge for RAG.
+Content is embedded using Snowflake Cortex for semantic search.
+Used to augment AI coaching with expert knowledge from sources like USMS.
+*/
+
+CREATE OR REPLACE TABLE coaching_knowledge (
+    knowledge_id VARCHAR(36) PRIMARY KEY,
+    
+    -- Content categorization
+    source VARCHAR(100) NOT NULL,      -- 'usms', 'effortless_swimming', 'swimsmooth', etc.
+    topic VARCHAR(100) NOT NULL,       -- 'freestyle_catch', 'breathing', 'flip_turns'
+    subtopic VARCHAR(100),             -- Optional finer categorization
+    
+    -- The actual content
+    title VARCHAR(500),
+    content TEXT NOT NULL,
+    
+    -- Vector embedding for semantic search (Snowflake Cortex)
+    -- Using e5-base-v2 model which produces 768-dimensional vectors
+    content_embedding VECTOR(FLOAT, 768),
+    
+    -- Metadata
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    
+    -- Quality/relevance scoring (can be updated based on usage)
+    relevance_score FLOAT DEFAULT 1.0
+);
+
+-- Indexes for fast lookups
+CREATE INDEX idx_knowledge_topic ON coaching_knowledge(topic);
+CREATE INDEX idx_knowledge_source ON coaching_knowledge(source);
+
+COMMENT ON TABLE coaching_knowledge IS 'RAG knowledge base: curated swimming technique content with embeddings';
+
+-- ---------------------------------------------------------------------------
 -- Stored Procedures
 -- ---------------------------------------------------------------------------
 

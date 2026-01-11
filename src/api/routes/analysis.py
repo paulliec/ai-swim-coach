@@ -29,6 +29,7 @@ from ...core.analysis.models import (
 )
 from ..dependencies import (
     AuthenticatedUser,
+    KnowledgeRepositoryDep,
     SessionRepositoryDep,
     SettingsDep,
     StorageClientDep,
@@ -273,6 +274,7 @@ async def analyze_session(
     storage: StorageClientDep = None,
     repository: SessionRepositoryDep = None,
     usage_limit_repo: UsageLimitRepositoryDep = None,
+    knowledge_repo: KnowledgeRepositoryDep = None,
 ) -> AnalysisResponse:
     """
     Analyze frames and generate coaching feedback.
@@ -421,6 +423,32 @@ async def analyze_session(
             detail="Failed to load frames"
         )
     
+    # Fetch relevant knowledge for RAG (optional - gracefully degrades if no knowledge)
+    knowledge_context: list[str] = []
+    try:
+        knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
+            stroke_type=analysis_request.stroke_type.value,
+            analysis_summary=analysis_request.user_notes if analysis_request.user_notes else None,
+            limit=5
+        )
+        knowledge_context = [chunk.content for chunk in knowledge_chunks]
+        
+        if knowledge_context:
+            logger.info(
+                "Retrieved RAG knowledge",
+                extra={
+                    "session_id": str(session_id),
+                    "chunk_count": len(knowledge_context),
+                    "stroke_type": analysis_request.stroke_type.value
+                }
+            )
+    except Exception as e:
+        # RAG is optional - don't fail the analysis if it fails
+        logger.warning(
+            "RAG knowledge retrieval failed, proceeding without",
+            extra={"session_id": str(session_id), "error": str(e)}
+        )
+    
     # Analyze with AI
     try:
         frames = FrameSet(frames=frame_data, timestamps_seconds=frame_timestamps)
@@ -429,6 +457,7 @@ async def analyze_session(
             frames=frames,
             stroke_type=analysis_request.stroke_type,
             user_notes=analysis_request.user_notes,
+            knowledge_context=knowledge_context if knowledge_context else None,
         )
         
         # Update session with analysis

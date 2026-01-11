@@ -30,6 +30,7 @@ from ..infrastructure.snowflake.repositories.sessions import (
     SnowflakeConfig,
 )
 from ..infrastructure.snowflake.repositories.usage_limits import UsageLimitRepository
+from ..infrastructure.snowflake.repositories.knowledge import KnowledgeRepository
 from ..infrastructure.storage.client import StorageClient, StorageConfig, create_storage_client
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,49 @@ def get_usage_limit_repository(
             yield repo
 
 
+def get_knowledge_repository(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Generator[KnowledgeRepository, None, None]:
+    """
+    Provide KnowledgeRepository for RAG queries.
+    
+    Used to retrieve relevant swimming technique knowledge
+    before generating AI coaching feedback.
+    
+    In mock mode, returns empty results (no knowledge base).
+    """
+    global _mock_snowflake_connection
+    
+    if settings.snowflake_mock_mode:
+        # Use shared mock connection
+        if _mock_snowflake_connection is None:
+            from ..infrastructure.snowflake.client import MockSnowflakeConnection
+            _mock_snowflake_connection = MockSnowflakeConnection()
+            logger.info("Created shared mock Snowflake connection for knowledge")
+        
+        repo = KnowledgeRepository(_mock_snowflake_connection)
+        logger.debug("Using shared mock Snowflake connection for knowledge")
+        yield repo
+    else:
+        # Use real Snowflake connection
+        config = SnowflakeConfig(
+            account=settings.snowflake_account,
+            user=settings.snowflake_user,
+            password=settings.snowflake_password or None,
+            private_key_path=settings.snowflake_private_key_path,
+            private_key_base64=settings.snowflake_private_key_base64,
+            database=settings.snowflake_database,
+            schema=settings.snowflake_schema,
+            warehouse=settings.snowflake_warehouse,
+            role=settings.snowflake_role,
+        )
+        
+        with create_snowflake_connection(config=config) as conn:
+            repo = KnowledgeRepository(conn)
+            logger.debug("Created KnowledgeRepository with Snowflake connection")
+            yield repo
+
+
 def get_storage_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> StorageClient:
@@ -251,6 +295,7 @@ AuthenticatedUser = Annotated[str, Depends(verify_api_key)]
 SwimCoachDep = Annotated[SwimCoach, Depends(get_swim_coach)]
 SessionRepositoryDep = Annotated[SessionRepository, Depends(get_session_repository)]
 UsageLimitRepositoryDep = Annotated[UsageLimitRepository, Depends(get_usage_limit_repository)]
+KnowledgeRepositoryDep = Annotated[KnowledgeRepository, Depends(get_knowledge_repository)]
 StorageClientDep = Annotated[StorageClient, Depends(get_storage_client)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 

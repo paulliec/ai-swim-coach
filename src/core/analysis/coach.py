@@ -92,6 +92,18 @@ Structure your analysis as:
 5. DRILLS: Specific drills to practice, with brief descriptions"""
 
 
+# RAG context template - inserted when knowledge chunks are available
+RAG_CONTEXT_TEMPLATE = """
+## Reference Knowledge
+The following expert swimming technique knowledge may be relevant to your analysis. 
+Use it to inform your feedback, but base your observations on what you actually see in the video.
+
+{knowledge_chunks}
+
+---
+"""
+
+
 ANALYSIS_USER_PROMPT_TEMPLATE = """I'm uploading {frame_count} frames from a swimming video.
 
 Context provided by the swimmer:
@@ -142,12 +154,19 @@ class SwimCoach:
         frames: FrameSet,
         stroke_type: StrokeType = StrokeType.FREESTYLE,
         user_notes: str = "",
+        knowledge_context: list[str] | None = None,
     ) -> AnalysisResult:
         """
         Perform initial analysis of video frames.
         
         This is the main entry point for new videos. It sends frames
         to the vision model and parses the response into structured feedback.
+        
+        Args:
+            frames: Video frames to analyze
+            stroke_type: The stroke being analyzed
+            user_notes: Optional notes from the swimmer
+            knowledge_context: Optional RAG knowledge chunks to augment analysis
         """
         user_prompt = ANALYSIS_USER_PROMPT_TEMPLATE.format(
             frame_count=len(frames.frames),
@@ -155,9 +174,20 @@ class SwimCoach:
             user_notes=user_notes or "None provided",
         )
         
+        # Build system prompt with optional RAG context
+        system_prompt = SYSTEM_PROMPT
+        if knowledge_context:
+            rag_content = "\n\n".join(
+                f"**{i+1}. {chunk}**" 
+                for i, chunk in enumerate(knowledge_context)
+            )
+            system_prompt = RAG_CONTEXT_TEMPLATE.format(
+                knowledge_chunks=rag_content
+            ) + system_prompt
+        
         raw_response = await self._vision_client.analyze_images(
             images=frames.frames,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
         
