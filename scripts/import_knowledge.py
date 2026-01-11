@@ -234,10 +234,10 @@ def insert_knowledge_to_snowflake(chunks: list[dict], dry_run: bool = False):
                     chunk['content']  # Same content for embedding
                 ))
                 inserted += 1
-                print(f"✓ Inserted: {chunk['topic']}/{chunk['subtopic'] or 'general'}")
+                print(f"[OK] Inserted: {chunk['topic']}/{chunk['subtopic'] or 'general'}")
             except Exception as e:
                 errors += 1
-                print(f"✗ Error inserting {chunk['topic']}: {e}")
+                print(f"[ERR] Error inserting {chunk['topic']}: {e}")
         
         conn.commit()
         cursor.close()
