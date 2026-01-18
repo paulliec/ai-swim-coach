@@ -213,7 +213,7 @@ async def upload_video(
         "Video upload started",
         extra={
             "session_id": str(session_id),
-            "filename": video.filename,
+            "video_filename": video.filename,
             "content_type": video.content_type,
             "user_id": x_user_id or "anonymous",
         }

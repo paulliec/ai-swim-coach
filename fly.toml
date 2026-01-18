@@ -15,8 +15,9 @@ primary_region = 'ord'
   PYTHONUNBUFFERED = '1'
   R2_MOCK_MODE = 'false'
   SNOWFLAKE_MOCK_MODE = 'false'
+  VIDEO_PROCESSOR_MOCK_MODE = 'false'
   # CORS - Update with your frontend domain(s)
-  CORS_ORIGINS = 'https://ai-swim-coach.pages.dev'
+  CORS_ORIGINS = 'https://ai-swim-coach.pages.dev,http://localhost:3000'
 
 [http_service]
   internal_port = 8080
