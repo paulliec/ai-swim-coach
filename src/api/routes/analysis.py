@@ -309,7 +309,7 @@ async def analyze_session(
         }
     )
     
-    # Check if API key or user ID bypasses rate limiting
+    # Check if API key, user ID, or email bypasses rate limiting
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
@@ -319,7 +319,13 @@ async def analyze_session(
         )
     elif x_user_id and x_user_id in settings.rate_limit_bypass_user_ids_list:
         bypass_rate_limit = True
-        logger.info(f"Rate limit bypassed for user {x_user_id}")
+        logger.info(f"Rate limit bypassed for user ID {x_user_id}")
+    
+    # also check email header if provided
+    x_user_email = fastapi_request.headers.get("x-user-email", "").lower()
+    if x_user_email and x_user_email in settings.rate_limit_bypass_emails_list:
+        bypass_rate_limit = True
+        logger.info(f"Rate limit bypassed for email {x_user_email}")
     
     # Check rate limits (3 analyses per day per user/IP) unless bypassed
     if not bypass_rate_limit:

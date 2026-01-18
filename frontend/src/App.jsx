@@ -89,6 +89,7 @@ function App() {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user.id,
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || '',
           'Content-Type': 'application/json'
         }
       })
@@ -292,7 +293,8 @@ function App() {
         method: 'POST',
         headers: {
           'X-API-Key': apiKey,
-          'X-User-Id': user?.id || 'anonymous'
+          'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || ''
         },
         body: formData
       })
@@ -342,6 +344,7 @@ function App() {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || '',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -417,7 +420,8 @@ function App() {
         method: 'POST',
         headers: {
           'X-API-Key': apiKey,
-          'X-User-Id': user?.id || 'anonymous'
+          'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || ''
         },
         body: formData
       })
@@ -444,6 +448,7 @@ function App() {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || '',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -521,6 +526,7 @@ function App() {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || '',
           'Content-Type': 'application/json'
         }
       })
@@ -581,6 +587,7 @@ function App() {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || '',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -642,7 +649,8 @@ function App() {
       const res = await fetch(`${API_BASE}/sessions/${sessionId}`, {
         headers: {
           'X-API-Key': apiKey,
-          'X-User-Id': user?.id || 'anonymous'
+          'X-User-Id': user?.id || 'anonymous',
+          'X-User-Email': user?.primaryEmailAddress?.emailAddress || ''
         }
       })
       
