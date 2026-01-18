@@ -465,10 +465,22 @@ Respond in JSON format as instructed."""
     
     # agentic loop
     import json
+    import asyncio
     rate_limit_hit = False
+    
+    # delay between API calls to avoid rate limiting
+    # this is a simple but effective strategy for agentic flows
+    # TODO: future improvement - check x-ratelimit-remaining-requests headers
+    # and adaptively throttle based on remaining capacity
+    API_CALL_DELAY_SECONDS = 2.0
     
     while iterations < request.max_iterations and not ready_for_final:
         iterations += 1
+        
+        # add delay between iterations (skip first iteration)
+        if iterations > 1:
+            logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before next API call")
+            await asyncio.sleep(API_CALL_DELAY_SECONDS)
         
         # send frames to vision model
         frame_images = [f.data for f in all_frames]
@@ -596,6 +608,10 @@ Otherwise, request more specific timestamp ranges."""
         )
     
     # now get the detailed feedback with timestamp references
+    # add delay before final API call to avoid rate limiting
+    logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before final analysis")
+    await asyncio.sleep(API_CALL_DELAY_SECONDS)
+    
     final_user_prompt = f"""You've reviewed {len(all_frames)} frames from this {video_info.duration_seconds:.1f}s swimming video.
 
 Stroke: {request.stroke_type.value}
