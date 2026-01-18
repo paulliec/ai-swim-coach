@@ -12,9 +12,10 @@ provisioning actual object storage.
 """
 
 import io
+import json
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,28 @@ class StorageClient(Protocol):
         storage_path: str,
     ) -> bytes:
         """Download video data by storage path."""
+        ...
+    
+    async def save_analysis_state(
+        self,
+        session_id: UUID,
+        state: dict[str, Any],
+    ) -> str:
+        """Save agentic analysis state for resume capability."""
+        ...
+    
+    async def load_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> Optional[dict[str, Any]]:
+        """Load saved analysis state. Returns None if no state exists."""
+        ...
+    
+    async def delete_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> bool:
+        """Delete analysis state after completion. Returns True if deleted."""
         ...
 
 
@@ -380,6 +403,103 @@ class R2StorageClient:
                 extra={"storage_path": storage_path, "error": str(e)}
             )
             raise StorageError(f"Video download failed: {e}")
+    
+    async def save_analysis_state(
+        self,
+        session_id: UUID,
+        state: dict[str, Any],
+    ) -> str:
+        """
+        Save agentic analysis state for resume capability.
+        
+        Stored as JSON alongside the video, enabling resume if
+        analysis is interrupted (e.g., by rate limits).
+        """
+        storage_path = f"videos/{session_id}/analysis_state.json"
+        
+        try:
+            state_json = json.dumps(state, default=str)
+            
+            self._s3_client.put_object(
+                Bucket=self._config.bucket_name,
+                Key=storage_path,
+                Body=state_json.encode('utf-8'),
+                ContentType='application/json',
+                Metadata={'session-id': str(session_id)}
+            )
+            
+            logger.info(
+                "Saved analysis state",
+                extra={"session_id": str(session_id), "storage_path": storage_path}
+            )
+            
+            return storage_path
+            
+        except Exception as e:
+            logger.error(
+                "Failed to save analysis state",
+                extra={"session_id": str(session_id), "error": str(e)}
+            )
+            raise StorageError(f"State save failed: {e}")
+    
+    async def load_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> Optional[dict[str, Any]]:
+        """Load saved analysis state. Returns None if no state exists."""
+        storage_path = f"videos/{session_id}/analysis_state.json"
+        
+        try:
+            response = self._s3_client.get_object(
+                Bucket=self._config.bucket_name,
+                Key=storage_path,
+            )
+            
+            state_json = response['Body'].read().decode('utf-8')
+            state = json.loads(state_json)
+            
+            logger.info(
+                "Loaded analysis state",
+                extra={"session_id": str(session_id), "iteration": state.get('iteration', 0)}
+            )
+            
+            return state
+            
+        except self._s3_client.exceptions.NoSuchKey:
+            logger.debug(f"No analysis state found for session {session_id}")
+            return None
+        except Exception as e:
+            # check if it's a "not found" type error
+            if 'NoSuchKey' in str(e) or '404' in str(e):
+                return None
+            logger.error(
+                "Failed to load analysis state",
+                extra={"session_id": str(session_id), "error": str(e)}
+            )
+            return None
+    
+    async def delete_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> bool:
+        """Delete analysis state after completion."""
+        storage_path = f"videos/{session_id}/analysis_state.json"
+        
+        try:
+            self._s3_client.delete_object(
+                Bucket=self._config.bucket_name,
+                Key=storage_path,
+            )
+            
+            logger.info("Deleted analysis state", extra={"session_id": str(session_id)})
+            return True
+            
+        except Exception as e:
+            logger.warning(
+                "Failed to delete analysis state (may not exist)",
+                extra={"session_id": str(session_id), "error": str(e)}
+            )
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -398,9 +518,10 @@ class MockStorageClient:
     """
     
     def __init__(self) -> None:
-        # store frames and videos in memory: {storage_path: bytes}
+        # store frames, videos, and state in memory: {storage_path: bytes}
         self._frames: dict[str, bytes] = {}
         self._videos: dict[str, bytes] = {}
+        self._states: dict[str, dict[str, Any]] = {}  # {session_id: state}
         logger.info("Initialized mock storage client (in-memory)")
     
     async def upload_frame(
@@ -495,6 +616,33 @@ class MockStorageClient:
             raise StorageError(f"Video not found: {storage_path}")
         
         return self._videos[storage_path]
+    
+    async def save_analysis_state(
+        self,
+        session_id: UUID,
+        state: dict[str, Any],
+    ) -> str:
+        """Save analysis state in memory."""
+        self._states[str(session_id)] = state
+        logger.debug(f"Saved analysis state for session {session_id}")
+        return f"videos/{session_id}/analysis_state.json"
+    
+    async def load_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> Optional[dict[str, Any]]:
+        """Load analysis state from memory."""
+        return self._states.get(str(session_id))
+    
+    async def delete_analysis_state(
+        self,
+        session_id: UUID,
+    ) -> bool:
+        """Delete analysis state from memory."""
+        if str(session_id) in self._states:
+            del self._states[str(session_id)]
+            return True
+        return False
 
 
 # ---------------------------------------------------------------------------

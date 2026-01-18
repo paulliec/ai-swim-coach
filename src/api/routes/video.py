@@ -120,6 +120,10 @@ class AgenticAnalysisResponse(BaseModel):
         default=False,
         description="True if analysis was interrupted (e.g., rate limit) but partial results available"
     )
+    can_resume: bool = Field(
+        default=False,
+        description="True if analysis can be resumed from where it left off"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -591,9 +595,30 @@ Continue your analysis. If you have enough information, provide final feedback.
 Otherwise, request more specific timestamp ranges."""
     
     # === FINAL ANALYSIS ===
-    # if rate limit hit during iterations, return partial results instead of failing
+    # if rate limit hit during iterations, save state and return partial results
     if rate_limit_hit:
-        logger.info("Returning partial results due to rate limit")
+        logger.info("Returning partial results due to rate limit, saving state for resume")
+        
+        # save state for resume capability
+        state_to_save = {
+            "iteration": iterations,
+            "frame_timestamps": [f.timestamp_seconds for f in all_frames],
+            "observations": last_observations,
+            "analysis_progress": [p.model_dump() for p in analysis_progress],
+            "stroke_type": request.stroke_type.value,
+            "user_notes": request.user_notes,
+            "initial_fps": request.initial_fps,
+            "max_iterations": request.max_iterations,
+            "ready_for_final": ready_for_final,
+            "video_duration": video_info.duration_seconds,
+        }
+        try:
+            await storage.save_analysis_state(session_id, state_to_save)
+            can_resume = True
+        except Exception as e:
+            logger.warning(f"Failed to save state for resume: {e}")
+            can_resume = False
+        
         return AgenticAnalysisResponse(
             session_id=session_id,
             stroke_type=request.stroke_type.value,
@@ -605,6 +630,7 @@ Otherwise, request more specific timestamp ranges."""
             iterations_used=iterations,
             analysis_progress=analysis_progress,
             partial=True,
+            can_resume=can_resume,
         )
     
     # now get the detailed feedback with timestamp references
@@ -634,9 +660,30 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
         error_msg = str(e)
         logger.error(f"Final analysis failed: {error_msg}")
         
-        # if rate limit on final pass, return what we have
+        # if rate limit on final pass, save state and return what we have
         if "rate limit" in error_msg.lower() and analysis_progress:
-            logger.info("Rate limit on final pass, returning partial results")
+            logger.info("Rate limit on final pass, saving state for resume")
+            
+            # save state - mark as ready_for_final since iterations completed
+            state_to_save = {
+                "iteration": iterations,
+                "frame_timestamps": [f.timestamp_seconds for f in all_frames],
+                "observations": last_observations,
+                "analysis_progress": [p.model_dump() for p in analysis_progress],
+                "stroke_type": request.stroke_type.value,
+                "user_notes": request.user_notes,
+                "initial_fps": request.initial_fps,
+                "max_iterations": request.max_iterations,
+                "ready_for_final": True,  # iterations completed, just need final pass
+                "video_duration": video_info.duration_seconds,
+            }
+            try:
+                await storage.save_analysis_state(session_id, state_to_save)
+                can_resume = True
+            except Exception as e:
+                logger.warning(f"Failed to save state for resume: {e}")
+                can_resume = False
+            
             return AgenticAnalysisResponse(
                 session_id=session_id,
                 stroke_type=request.stroke_type.value,
@@ -648,6 +695,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
                 iterations_used=iterations,
                 analysis_progress=analysis_progress,
                 partial=True,
+                can_resume=can_resume,
             )
         
         raise HTTPException(
@@ -689,6 +737,12 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             priority=fb.get("priority", "secondary"),
         ))
     
+    # clean up any saved state since analysis completed successfully
+    try:
+        await storage.delete_analysis_state(session_id)
+    except Exception:
+        pass  # ignore cleanup errors
+    
     logger.info(
         "Agentic analysis complete",
         extra={
@@ -710,4 +764,394 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
         iterations_used=iterations,
         analysis_progress=analysis_progress,
         partial=False,
+        can_resume=False,
+    )
+
+
+@router.post(
+    "/{session_id}/resume",
+    response_model=AgenticAnalysisResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resume interrupted analysis",
+    description="Continue analysis from where it left off after a rate limit interruption",
+)
+async def resume_video_analysis(
+    session_id: UUID,
+    fastapi_request: Request,
+    x_user_id: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header()] = None,
+    api_key: AuthenticatedUser = None,
+    settings: SettingsDep = None,
+    storage: StorageClientDep = None,
+    video_processor: VideoProcessorDep = None,
+    vision_client: VisionClientDep = None,
+    knowledge_repo: KnowledgeRepositoryDep = None,
+    usage_limit_repo: UsageLimitRepositoryDep = None,
+) -> AgenticAnalysisResponse:
+    """
+    Resume an interrupted agentic analysis.
+    
+    This endpoint loads saved state from a previous analysis that was
+    interrupted (e.g., by rate limiting) and continues from where it left off.
+    
+    If no saved state exists, returns an error.
+    """
+    logger.info(f"Attempting to resume analysis for session {session_id}")
+    
+    # load saved state
+    saved_state = await storage.load_analysis_state(session_id)
+    
+    if not saved_state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No saved state found for this session. Start a new analysis instead."
+        )
+    
+    logger.info(
+        "Loaded saved state",
+        extra={
+            "session_id": str(session_id),
+            "saved_iteration": saved_state.get("iteration", 0),
+            "ready_for_final": saved_state.get("ready_for_final", False),
+        }
+    )
+    
+    # rate limit check (don't count against limit if resuming)
+    bypass_rate_limit = True  # resuming is free - they already paid for this analysis
+    
+    # download video from storage
+    video_path = f"videos/{session_id}/original.mp4"
+    try:
+        video_data = await storage.download_video(video_path)
+    except Exception as e:
+        for ext in ["mov", "avi", "webm"]:
+            try:
+                video_path = f"videos/{session_id}/original.{ext}"
+                video_data = await storage.download_video(video_path)
+                break
+            except:
+                continue
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Video not found. Upload a video first."
+            )
+    
+    video_info = await video_processor.get_video_info(video_data)
+    
+    # restore state
+    saved_iteration = saved_state.get("iteration", 0)
+    saved_frame_timestamps = saved_state.get("frame_timestamps", [])
+    saved_observations = saved_state.get("observations", "")
+    saved_progress = saved_state.get("analysis_progress", [])
+    stroke_type = saved_state.get("stroke_type", "freestyle")
+    user_notes = saved_state.get("user_notes", "")
+    max_iterations = saved_state.get("max_iterations", 3)
+    ready_for_final = saved_state.get("ready_for_final", False)
+    
+    # restore analysis_progress from saved state
+    analysis_progress = [
+        AnalysisIteration(**p) for p in saved_progress
+    ]
+    
+    # re-extract the frames we had before
+    logger.info(f"Re-extracting {len(saved_frame_timestamps)} frames from saved timestamps")
+    all_frames = await video_processor.extract_frames_at_timestamps(
+        video_data=video_data,
+        timestamps=saved_frame_timestamps,
+    )
+    
+    # fetch RAG knowledge
+    knowledge_context = []
+    try:
+        knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
+            stroke_type=stroke_type,
+            analysis_summary=user_notes if user_notes else None,
+            limit=5,
+        )
+        knowledge_context = [chunk.content for chunk in knowledge_chunks]
+    except Exception as e:
+        logger.warning(f"RAG retrieval failed: {e}")
+    
+    # if ready for final, skip straight to final analysis
+    if ready_for_final:
+        logger.info("Resuming at final analysis stage")
+    else:
+        logger.info(f"Resuming at iteration {saved_iteration + 1}")
+    
+    # continue from where we left off
+    import json
+    import asyncio
+    rate_limit_hit = False
+    iterations = saved_iteration
+    last_observations = saved_observations
+    API_CALL_DELAY_SECONDS = 2.0
+    
+    system_prompt = INITIAL_ANALYSIS_SYSTEM_PROMPT
+    if knowledge_context:
+        rag_section = "\n\nReference knowledge:\n" + "\n".join(
+            f"- {chunk}" for chunk in knowledge_context[:3]
+        )
+        system_prompt += rag_section
+    
+    # continue agentic loop if not ready for final
+    if not ready_for_final:
+        frame_descriptions = "\n".join([
+            f"- Frame {i+1}: {f.timestamp_formatted}"
+            for i, f in enumerate(all_frames)
+        ])
+        user_prompt = f"""Continuing analysis of swimming video. You have {len(all_frames)} frames:
+{frame_descriptions}
+
+Previous observations: {saved_observations}
+
+Continue your analysis. If you have enough information, provide final feedback.
+Otherwise, request more specific timestamp ranges."""
+        
+        while iterations < max_iterations and not ready_for_final:
+            iterations += 1
+            
+            # throttle
+            logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before API call")
+            await asyncio.sleep(API_CALL_DELAY_SECONDS)
+            
+            frame_images = [f.data for f in all_frames]
+            
+            try:
+                response = await vision_client.analyze_images(
+                    images=frame_images,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Vision analysis failed during resume: {error_msg}")
+                
+                if "rate limit" in error_msg.lower() and analysis_progress:
+                    rate_limit_hit = True
+                    break
+                
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"AI analysis failed: {error_msg}"
+                )
+            
+            # parse response
+            try:
+                json_str = response
+                if "```json" in response:
+                    json_str = response.split("```json")[1].split("```")[0]
+                elif "```" in response:
+                    json_str = response.split("```")[1].split("```")[0]
+                analysis = json.loads(json_str.strip())
+            except json.JSONDecodeError:
+                ready_for_final = True
+                break
+            
+            current_observations = analysis.get("observations", analysis.get("summary", ""))
+            last_observations = current_observations
+            
+            areas_to_examine = analysis.get("areas_to_examine", [])
+            areas_requested_formatted = [
+                f"{format_timestamp(a.get('timestamp_start', 0))} - {format_timestamp(a.get('timestamp_end', 0))}"
+                for a in areas_to_examine[:3]
+            ]
+            
+            analysis_progress.append(AnalysisIteration(
+                iteration=iterations,
+                frames_reviewed=len(all_frames),
+                observations=current_observations[:500] if current_observations else "Analyzing...",
+                areas_requested=areas_requested_formatted,
+            ))
+            
+            if analysis.get("ready_to_provide_feedback", False) or not areas_to_examine:
+                ready_for_final = True
+                break
+            
+            # extract more frames
+            additional_timestamps = []
+            for area in areas_to_examine[:3]:
+                start = area.get("timestamp_start", 0)
+                end = area.get("timestamp_end", start + 1)
+                t = start
+                while t <= end and len(additional_timestamps) < 20:
+                    additional_timestamps.append(t)
+                    t += 0.2
+            
+            if additional_timestamps:
+                new_frames = await video_processor.extract_frames_at_timestamps(
+                    video_data=video_data,
+                    timestamps=additional_timestamps,
+                )
+                all_frames.extend(new_frames)
+                
+                frame_descriptions = "\n".join([
+                    f"- Frame {i+1}: {f.timestamp_formatted}"
+                    for i, f in enumerate(all_frames)
+                ])
+                user_prompt = f"""I've added more frames. You now have {len(all_frames)} total frames:
+{frame_descriptions}
+
+Continue your analysis. If you have enough information, provide final feedback.
+Otherwise, request more specific timestamp ranges."""
+    
+    # check if rate limit hit again during resume
+    if rate_limit_hit:
+        logger.info("Rate limit hit again during resume, saving state")
+        state_to_save = {
+            "iteration": iterations,
+            "frame_timestamps": [f.timestamp_seconds for f in all_frames],
+            "observations": last_observations,
+            "analysis_progress": [p.model_dump() for p in analysis_progress],
+            "stroke_type": stroke_type,
+            "user_notes": user_notes,
+            "initial_fps": saved_state.get("initial_fps", 0.5),
+            "max_iterations": max_iterations,
+            "ready_for_final": ready_for_final,
+            "video_duration": video_info.duration_seconds,
+        }
+        try:
+            await storage.save_analysis_state(session_id, state_to_save)
+            can_resume = True
+        except Exception as e:
+            logger.warning(f"Failed to save state: {e}")
+            can_resume = False
+        
+        return AgenticAnalysisResponse(
+            session_id=session_id,
+            stroke_type=stroke_type,
+            summary=f"⚠️ Partial analysis (rate limit again). Progress saved.\n\n{last_observations}",
+            strengths=[],
+            timestamp_feedback=[],
+            drills=["Wait 1-2 minutes and resume again"],
+            total_frames_analyzed=len(all_frames),
+            iterations_used=iterations,
+            analysis_progress=analysis_progress,
+            partial=True,
+            can_resume=can_resume,
+        )
+    
+    # === FINAL ANALYSIS ===
+    logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before final analysis")
+    await asyncio.sleep(API_CALL_DELAY_SECONDS)
+    
+    final_user_prompt = f"""You've reviewed {len(all_frames)} frames from this {video_info.duration_seconds:.1f}s swimming video.
+
+Stroke: {stroke_type}
+Swimmer's notes: {user_notes or 'None provided'}
+
+Frame timestamps reviewed:
+{chr(10).join([f"- {f.timestamp_formatted}" for f in all_frames[:20]])}
+{"..." if len(all_frames) > 20 else ""}
+
+Now provide your complete coaching feedback in JSON format.
+IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")"""
+
+    try:
+        final_response = await vision_client.analyze_images(
+            images=[f.data for f in all_frames],
+            system_prompt=DETAILED_ANALYSIS_SYSTEM_PROMPT,
+            user_prompt=final_user_prompt,
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Final analysis failed during resume: {error_msg}")
+        
+        if "rate limit" in error_msg.lower():
+            state_to_save = {
+                "iteration": iterations,
+                "frame_timestamps": [f.timestamp_seconds for f in all_frames],
+                "observations": last_observations,
+                "analysis_progress": [p.model_dump() for p in analysis_progress],
+                "stroke_type": stroke_type,
+                "user_notes": user_notes,
+                "initial_fps": saved_state.get("initial_fps", 0.5),
+                "max_iterations": max_iterations,
+                "ready_for_final": True,
+                "video_duration": video_info.duration_seconds,
+            }
+            try:
+                await storage.save_analysis_state(session_id, state_to_save)
+                can_resume = True
+            except:
+                can_resume = False
+            
+            return AgenticAnalysisResponse(
+                session_id=session_id,
+                stroke_type=stroke_type,
+                summary=f"⚠️ Rate limit on final pass. Almost done!\n\n{last_observations}",
+                strengths=[],
+                timestamp_feedback=[],
+                drills=["Wait 1-2 minutes and resume for final results"],
+                total_frames_analyzed=len(all_frames),
+                iterations_used=iterations,
+                analysis_progress=analysis_progress,
+                partial=True,
+                can_resume=can_resume,
+            )
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Final analysis failed"
+        )
+    
+    # parse final response
+    try:
+        json_str = final_response
+        if "```json" in final_response:
+            json_str = final_response.split("```json")[1].split("```")[0]
+        elif "```" in final_response:
+            json_str = final_response.split("```")[1].split("```")[0]
+        final_analysis = json.loads(json_str.strip())
+    except json.JSONDecodeError:
+        final_analysis = {
+            "summary": final_response,
+            "strengths": [],
+            "timestamp_feedback": [],
+            "drills": [],
+        }
+    
+    # build response
+    timestamp_feedback = []
+    for fb in final_analysis.get("timestamp_feedback", []):
+        start = fb.get("start_timestamp", 0)
+        end = fb.get("end_timestamp", start)
+        timestamp_feedback.append(TimestampFeedback(
+            start_timestamp=start,
+            end_timestamp=end,
+            start_formatted=format_timestamp(start),
+            end_formatted=format_timestamp(end),
+            category=fb.get("category", "general"),
+            observation=fb.get("observation", ""),
+            recommendation=fb.get("recommendation", ""),
+            priority=fb.get("priority", "secondary"),
+        ))
+    
+    # clean up saved state
+    try:
+        await storage.delete_analysis_state(session_id)
+    except:
+        pass
+    
+    logger.info(
+        "Resume analysis complete",
+        extra={
+            "session_id": str(session_id),
+            "total_frames": len(all_frames),
+            "iterations": iterations,
+        }
+    )
+    
+    return AgenticAnalysisResponse(
+        session_id=session_id,
+        stroke_type=stroke_type,
+        summary=final_analysis.get("summary", ""),
+        strengths=final_analysis.get("strengths", []),
+        timestamp_feedback=timestamp_feedback,
+        drills=final_analysis.get("drills", []),
+        total_frames_analyzed=len(all_frames),
+        iterations_used=iterations,
+        analysis_progress=analysis_progress,
+        partial=False,
+        can_resume=False,
     )

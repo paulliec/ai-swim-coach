@@ -476,6 +476,7 @@ function App() {
         iterations: analysisData.iterations_used,
         analysis_progress: analysisData.analysis_progress || [],  // progress from each iteration
         partial: analysisData.partial || false,  // true if analysis was interrupted
+        can_resume: analysisData.can_resume || false,  // true if can resume from where it left off
         isAgentic: true  // Flag to render timestamp UI
       })
       
@@ -490,6 +491,66 @@ function App() {
       console.error('Video analysis error:', err)
     } finally {
       setVideoUploading(false)
+      setAnalyzing(false)
+      setAgenticProgress('')
+    }
+  }
+
+  // Resume interrupted analysis
+  const handleResumeAnalysis = async () => {
+    if (!apiKey) {
+      setError('Please enter your API key')
+      setShowApiKeyInput(true)
+      return
+    }
+    
+    if (!sessionId && !analysis?.session_id) {
+      setError('No session to resume')
+      return
+    }
+    
+    const resumeSessionId = sessionId || analysis?.session_id
+    
+    setAnalyzing(true)
+    setError(null)
+    setAgenticProgress('Resuming analysis...')
+    
+    try {
+      const resumeRes = await fetch(`${API_BASE}/video/${resumeSessionId}/resume`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous',
+          'Content-Type': 'application/json'
+        }
+      })
+      
+      if (!resumeRes.ok) {
+        const errData = await resumeRes.json().catch(() => ({}))
+        throw new Error(errData.detail || 'Resume failed')
+      }
+      
+      const analysisData = await resumeRes.json()
+      
+      setAnalysis({
+        session_id: analysisData.session_id,
+        stroke_type: analysisData.stroke_type,
+        summary: analysisData.summary,
+        strengths: analysisData.strengths,
+        timestamp_feedback: analysisData.timestamp_feedback,
+        drills: analysisData.drills,
+        frame_count: analysisData.total_frames_analyzed,
+        iterations: analysisData.iterations_used,
+        analysis_progress: analysisData.analysis_progress || [],
+        partial: analysisData.partial || false,
+        can_resume: analysisData.can_resume || false,
+        isAgentic: true
+      })
+      
+    } catch (err) {
+      setError(err.message)
+      console.error('Resume analysis error:', err)
+    } finally {
       setAnalyzing(false)
       setAgenticProgress('')
     }
@@ -1009,18 +1070,30 @@ function App() {
                         <div className="flex-1">
                           <p className="font-semibold text-yellow-800 mb-1">Partial Analysis</p>
                           <p className="text-sm text-yellow-700 mb-2">
-                            The AI hit a rate limit during analysis. Here's what it observed so far.
-                            Try again in 1-2 minutes for the complete analysis.
+                            {analysis.can_resume 
+                              ? "The AI hit a rate limit. Your progress is saved! Wait 1-2 minutes then click Resume to continue from where it left off."
+                              : "The AI hit a rate limit during analysis. Here's what it observed so far. Try again in 1-2 minutes for the complete analysis."}
                           </p>
-                          <button
-                            onClick={() => {
-                              setAnalysis(null)
-                              setError(null)
-                            }}
-                            className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm font-medium"
-                          >
-                            🔄 Reset and Try Again
-                          </button>
+                          <div className="flex gap-2">
+                            {analysis.can_resume && (
+                              <button
+                                onClick={handleResumeAnalysis}
+                                disabled={analyzing}
+                                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 text-sm font-medium"
+                              >
+                                {analyzing ? '⏳ Resuming...' : '▶️ Resume Analysis'}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setAnalysis(null)
+                                setError(null)
+                              }}
+                              className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm font-medium"
+                            >
+                              🔄 Start Over
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
