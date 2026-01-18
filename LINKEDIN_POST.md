@@ -34,36 +34,24 @@ Building AI that sees and reasons about visual content is becoming a critical sk
 
 ---
 
-## Option 2: Story Focus
+## Option 2: Story Focus (Short)
 
 ---
 
-🏊‍♂️ **I built an AI that coaches swimmers. Here's what I learned.**
+🏊‍♂️ **Built an AI swim coach. Here's the fun part.**
 
-I've been swimming for years. Getting feedback usually means: expensive coach, or filming yourself and... guessing.
+I learned to swim during COVID - backyard pool, YouTube videos, eventually joined a masters team. Getting real technique feedback meant paying a coach or just... guessing.
 
-So I built something: upload a video, AI analyzes your technique frame-by-frame, then you can ask follow-up questions like you would with a real coach.
+So I built one: upload a video, get frame-by-frame analysis, ask follow-ups like talking to a real coach.
 
-**The interesting technical challenges:**
+The hard parts weren't the AI — they were cross-browser video handling (still battling Safari), getting Claude to give *specific* cues instead of generic advice, and all the production stuff nobody talks about.
 
-1️⃣ **Vision AI prompt engineering** — Getting Claude to give *specific* feedback ("your elbow drops 15° during catch") vs generic advice ("keep your body streamlined")
+Now it uses RAG with Snowflake Cortex to pull from real swimming methodology before analyzing your stroke.
 
-2️⃣ **Client-side video processing** — Extracting frames in the browser means users upload 3MB of images instead of 100MB of video
+Try it: ai-swim-coach.pages.dev
+Technical deep-dive: https://medium.com/@paul.ccarson/building-an-ai-powered-video-coaching-app-a-technical-deep-dive-4424779ba053
 
-3️⃣ **Conversational context** — The AI remembers what it said before, so you can have a real coaching conversation
-
-4️⃣ **Production reality** — Rate limiting, CORS configuration, mobile Safari quirks, Snowflake VARIANT column parsing... the unglamorous stuff that makes apps actually work
-
-**Stack:** React, FastAPI, Claude API, Snowflake, Fly.io, Cloudflare Pages
-
-Next up: RAG with established swimming methodology (USMS, Total Immersion) to ground the coaching in authoritative sources.
-
-Try it yourself: ai-swim-coach.pages.dev
-Technical walkthrough: [Medium link]
-
-What visual AI applications are you exploring?
-
-#AI #BuildInPublic #SoftwareEngineering #Swimming
+#AI #BuildInPublic #SoftwareEngineering
 
 ---
 
