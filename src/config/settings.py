@@ -38,7 +38,11 @@ class Settings(BaseSettings):
     )
     rate_limit_bypass_emails: str = Field(
         default="",
-        description="Comma-separated email addresses (from Clerk user ID) that bypass rate limiting."
+        description="Comma-separated email addresses that bypass rate limiting."
+    )
+    rate_limit_bypass_user_ids: str = Field(
+        default="",
+        description="Comma-separated Clerk user IDs that bypass rate limiting. For testers/admins."
     )
     
     # Anthropic Configuration
@@ -181,6 +185,11 @@ class Settings(BaseSettings):
     def rate_limit_bypass_emails_list(self) -> list[str]:
         """Parse comma-separated bypass emails into a list."""
         return [email.strip().lower() for email in self.rate_limit_bypass_emails.split(",") if email.strip()]
+    
+    @property
+    def rate_limit_bypass_user_ids_list(self) -> list[str]:
+        """Parse comma-separated bypass user IDs into a list."""
+        return [uid.strip() for uid in self.rate_limit_bypass_user_ids.split(",") if uid.strip()]
     
     @property
     def cors_origins_list(self) -> list[str]:

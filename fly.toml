@@ -18,6 +18,8 @@ primary_region = 'ord'
   VIDEO_PROCESSOR_MOCK_MODE = 'false'
   # CORS - Update with your frontend domain(s)
   CORS_ORIGINS = 'https://ai-swim-coach.pages.dev,http://localhost:3000'
+  # Rate limit bypass - set via: fly secrets set RATE_LIMIT_BYPASS_USER_IDS="user_xxx,user_yyy"
+  # RATE_LIMIT_BYPASS_USER_IDS = '' # Set as secret, not here
 
 [http_service]
   internal_port = 8080

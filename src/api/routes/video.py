@@ -359,10 +359,14 @@ async def analyze_video_agentic(
         }
     )
     
-    # rate limit check
+    # rate limit check - bypass for trusted API keys or specific user IDs
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
+        logger.info(f"Rate limit bypassed via API key")
+    elif x_user_id and x_user_id in settings.rate_limit_bypass_user_ids_list:
+        bypass_rate_limit = True
+        logger.info(f"Rate limit bypassed for user {x_user_id}")
     
     if not bypass_rate_limit:
         identifier = x_user_id if x_user_id else (

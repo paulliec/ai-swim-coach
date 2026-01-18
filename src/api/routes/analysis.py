@@ -309,7 +309,7 @@ async def analyze_session(
         }
     )
     
-    # Check if API key bypasses rate limiting
+    # Check if API key or user ID bypasses rate limiting
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
@@ -317,6 +317,9 @@ async def analyze_session(
             "Rate limit bypassed: trusted API key",
             extra={"api_key_prefix": x_api_key[:8] + "..." if len(x_api_key) > 8 else x_api_key}
         )
+    elif x_user_id and x_user_id in settings.rate_limit_bypass_user_ids_list:
+        bypass_rate_limit = True
+        logger.info(f"Rate limit bypassed for user {x_user_id}")
     
     # Check rate limits (3 analyses per day per user/IP) unless bypassed
     if not bypass_rate_limit:
