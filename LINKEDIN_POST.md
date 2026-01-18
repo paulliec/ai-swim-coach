@@ -40,18 +40,18 @@ Building AI that sees and reasons about visual content is becoming a critical sk
 
 🏊‍♂️ **Built an AI swim coach. Here's the fun part.**
 
-I learned to swim during COVID - backyard pool, YouTube videos, eventually joined a masters team. Getting real technique feedback meant paying a coach or just... guessing.
+Learned to swim during COVID - backyard pool, YouTube videos, eventually joined a masters team. Getting real technique feedback meant paying a coach or just... guessing.
 
-So I built one: upload a video, get frame-by-frame analysis, ask follow-ups like talking to a real coach.
+So I built one: upload a video, AI analyzes, asks for more frames at key moments, gives timestamp-linked feedback like "at 0:12-0:15, your elbow drops during the catch."
 
-The hard parts weren't the AI — they were cross-browser video handling (still battling Safari), getting Claude to give *specific* cues instead of generic advice, and all the production stuff nobody talks about.
+The tech stack: Claude vision API, agentic multi-pass analysis, FFmpeg frame extraction, RAG with Snowflake Cortex pulling from real swimming methodology.
 
-Now it uses RAG with Snowflake Cortex to pull from real swimming methodology before analyzing your stroke.
+The hard parts? Cross-browser video handling (Safari, why), getting AI to give *specific* cues, and all the production stuff nobody talks about.
 
 Try it: ai-swim-coach.pages.dev
-Technical deep-dive: https://medium.com/@paul.ccarson/building-an-ai-powered-video-coaching-app-a-technical-deep-dive-4424779ba053
+Deep-dive: https://medium.com/@paul.ccarson/building-an-ai-powered-video-coaching-app-a-technical-deep-dive-4424779ba053
 
-#AI #BuildInPublic #SoftwareEngineering
+#AI #BuildInPublic #AgenticAI
 
 ---
 
