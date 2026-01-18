@@ -138,7 +138,15 @@ class Settings(BaseSettings):
     )
     max_upload_size_mb: int = Field(
         default=100,
-        description="Maximum total upload size in MB. Prevents abuse and controls costs."
+        description="Maximum total upload size in MB for frames. Prevents abuse and controls costs."
+    )
+    max_video_size_mb: int = Field(
+        default=100,
+        description="Maximum video file size in MB for server-side processing."
+    )
+    video_processor_mock_mode: bool = Field(
+        default=False,
+        description="Use mock video processor (no FFmpeg required). For local dev without FFmpeg."
     )
     
     # Logging

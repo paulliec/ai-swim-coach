@@ -6,6 +6,12 @@ const STROKE_TYPES = ['freestyle', 'backstroke', 'breaststroke', 'butterfly']
 // API base URL - uses environment variable for production, defaults to proxy for local dev
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
+// Analysis modes
+const ANALYSIS_MODES = {
+  FRAMES: 'frames',    // Client-side frame extraction (original)
+  VIDEO: 'video',      // Server-side video processing (agentic)
+}
+
 function App() {
   const { user, isLoaded } = useUser()
   
@@ -42,6 +48,12 @@ function App() {
   // Frame extraction settings
   const [framesPerSecond, setFramesPerSecond] = useState(1)
   const [videoDuration, setVideoDuration] = useState(0)
+  
+  // Analysis mode - frames (client) or video (server/agentic)
+  const [analysisMode, setAnalysisMode] = useState(ANALYSIS_MODES.FRAMES)
+  const [videoUploading, setVideoUploading] = useState(false)
+  const [videoInfo, setVideoInfo] = useState(null)
+  const [agenticProgress, setAgenticProgress] = useState('')
   
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -379,6 +391,108 @@ function App() {
     }
   }
 
+  // Upload video for server-side processing (agentic mode)
+  const handleVideoUpload = async () => {
+    if (!apiKey) {
+      setError('Please enter your API key')
+      setShowApiKeyInput(true)
+      return
+    }
+    
+    if (!videoFile) {
+      setError('Please select a video first')
+      return
+    }
+    
+    setVideoUploading(true)
+    setError(null)
+    setAgenticProgress('Uploading video...')
+    
+    try {
+      // Step 1: Upload video
+      const formData = new FormData()
+      formData.append('video', videoFile)
+      
+      const uploadRes = await fetch(`${API_BASE}/video/upload`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous'
+        },
+        body: formData
+      })
+      
+      if (!uploadRes.ok) {
+        const errData = await uploadRes.json().catch(() => ({}))
+        throw new Error(errData.detail || 'Video upload failed')
+      }
+      
+      const uploadData = await uploadRes.json()
+      setSessionId(uploadData.session_id)
+      setVideoInfo({
+        duration: uploadData.duration_seconds,
+        resolution: uploadData.resolution,
+        fps: uploadData.fps
+      })
+      
+      // Step 2: Run agentic analysis
+      setAgenticProgress('Starting AI analysis...')
+      setAnalyzing(true)
+      
+      const analyzeRes = await fetch(`${API_BASE}/video/${uploadData.session_id}/analyze`, {
+        method: 'POST',
+        headers: {
+          'X-API-Key': apiKey,
+          'X-User-Id': user?.id || 'anonymous',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          stroke_type: strokeType,
+          user_notes: userNotes,
+          initial_fps: 0.5,
+          max_iterations: 3
+        })
+      })
+      
+      if (!analyzeRes.ok) {
+        const errData = await analyzeRes.json().catch(() => ({}))
+        if (analyzeRes.status === 429) {
+          throw new Error("You've reached your daily limit. Come back tomorrow!")
+        }
+        throw new Error(errData.detail || 'Analysis failed')
+      }
+      
+      const analysisData = await analyzeRes.json()
+      
+      // Convert agentic response to display format
+      setAnalysis({
+        session_id: analysisData.session_id,
+        stroke_type: analysisData.stroke_type,
+        summary: analysisData.summary,
+        strengths: analysisData.strengths,
+        timestamp_feedback: analysisData.timestamp_feedback,
+        drills: analysisData.drills,
+        frame_count: analysisData.total_frames_analyzed,
+        iterations: analysisData.iterations_used,
+        isAgentic: true  // Flag to render timestamp UI
+      })
+      
+      if (!user) {
+        localStorage.setItem('anonymous_session_id', analysisData.session_id)
+        setAnonymousSessionId(analysisData.session_id)
+        setShowSignupPrompt(true)
+      }
+      
+    } catch (err) {
+      setError(err.message)
+      console.error('Video analysis error:', err)
+    } finally {
+      setVideoUploading(false)
+      setAnalyzing(false)
+      setAgenticProgress('')
+    }
+  }
+
   // Send chat message
   const handleChat = async (e) => {
     e.preventDefault()
@@ -679,6 +793,40 @@ function App() {
               <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
                 <h2 className="text-2xl font-semibold mb-4">1. Select Video</h2>
                 
+                {/* Analysis Mode Toggle */}
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Analysis Mode</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setAnalysisMode(ANALYSIS_MODES.FRAMES)}
+                      className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        analysisMode === ANALYSIS_MODES.FRAMES
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                      }`}
+                    >
+                      📸 Frame Mode
+                      <span className="block text-xs opacity-75">Browser extracts frames</span>
+                    </button>
+                    <button
+                      onClick={() => setAnalysisMode(ANALYSIS_MODES.VIDEO)}
+                      className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        analysisMode === ANALYSIS_MODES.VIDEO
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-100'
+                      }`}
+                    >
+                      🎬 Video Mode
+                      <span className="block text-xs opacity-75">AI requests specific frames</span>
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    {analysisMode === ANALYSIS_MODES.VIDEO 
+                      ? '✨ Video Mode: AI analyzes, requests more frames from specific moments, gives timestamp-linked feedback'
+                      : 'Frame Mode: Works on all devices. Good for quick analysis.'}
+                  </p>
+                </div>
+                
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -689,14 +837,31 @@ function App() {
                 
                 <button
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={extracting}
+                  disabled={extracting || videoUploading}
                   className="w-full px-6 py-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-semibold"
                 >
                   {extracting ? 'Extracting frames...' : videoFile ? `Change Video (${videoFile.name})` : 'Choose Video File'}
                 </button>
 
-                {/* Frame Previews */}
-                {frames.length > 0 && (
+                {/* Video Info (for video mode) */}
+                {videoFile && analysisMode === ANALYSIS_MODES.VIDEO && (
+                  <div className="mt-4 p-3 bg-purple-50 rounded-lg">
+                    <p className="text-sm text-purple-800">
+                      <strong>📹 Video selected:</strong> {videoFile.name}
+                      {videoInfo && (
+                        <span className="ml-2">
+                          ({videoInfo.duration?.toFixed(1)}s, {videoInfo.resolution})
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-purple-600 mt-1">
+                      Video will be uploaded to server for AI-guided frame extraction
+                    </p>
+                  </div>
+                )}
+
+                {/* Frame Previews (for frame mode) */}
+                {frames.length > 0 && analysisMode === ANALYSIS_MODES.FRAMES && (
                   <div className="mt-6">
                     <h3 className="font-semibold mb-3">
                       Extracted {frames.length} frames
@@ -720,42 +885,45 @@ function App() {
               </div>
 
               {/* Analysis Form */}
-              {frames.length > 0 && !analysis && (
+              {((frames.length > 0 && analysisMode === ANALYSIS_MODES.FRAMES) || 
+                (videoFile && analysisMode === ANALYSIS_MODES.VIDEO)) && !analysis && (
                 <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
                   <h2 className="text-2xl font-semibold mb-4">2. Analysis Settings</h2>
                   
                   <div className="space-y-4">
-                    {/* FPS Selector */}
-                    <div>
-                      <label className="block font-medium mb-2">
-                        Frame Rate: {framesPerSecond} FPS
-                        <span className="text-gray-500 font-normal ml-2">
-                          ({Math.max(5, Math.min(Math.round(videoDuration * framesPerSecond), isMobileDevice() ? 40 : 60))} frames)
-                        </span>
-                      </label>
-                      <input
-                        type="range"
-                        min="0.5"
-                        max="3"
-                        step="0.5"
-                        value={framesPerSecond}
-                        onChange={(e) => {
-                          const newFps = parseFloat(e.target.value)
-                          setFramesPerSecond(newFps)
-                          if (videoFile) {
-                            extractFrames(videoFile, newFps)
-                          }
-                        }}
-                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                      />
-                      <div className="flex justify-between text-xs text-gray-500 mt-1">
-                        <span>0.5 (fewer frames)</span>
-                        <span>3 (more detail)</span>
+                    {/* FPS Selector (only for frame mode) */}
+                    {analysisMode === ANALYSIS_MODES.FRAMES && (
+                      <div>
+                        <label className="block font-medium mb-2">
+                          Frame Rate: {framesPerSecond} FPS
+                          <span className="text-gray-500 font-normal ml-2">
+                            ({Math.max(5, Math.min(Math.round(videoDuration * framesPerSecond), isMobileDevice() ? 40 : 60))} frames)
+                          </span>
+                        </label>
+                        <input
+                          type="range"
+                          min="0.5"
+                          max="3"
+                          step="0.5"
+                          value={framesPerSecond}
+                          onChange={(e) => {
+                            const newFps = parseFloat(e.target.value)
+                            setFramesPerSecond(newFps)
+                            if (videoFile) {
+                              extractFrames(videoFile, newFps)
+                            }
+                          }}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <div className="flex justify-between text-xs text-gray-500 mt-1">
+                          <span>0.5 (fewer frames)</span>
+                          <span>3 (more detail)</span>
+                        </div>
+                        <p className="text-sm text-gray-600 mt-2">
+                          Higher FPS captures more detail for fast movements (catch, entry). Lower FPS is faster to analyze.
+                        </p>
                       </div>
-                      <p className="text-sm text-gray-600 mt-2">
-                        Higher FPS captures more detail for fast movements (catch, entry). Lower FPS is faster to analyze.
-                      </p>
-                    </div>
+                    )}
                     
                     <div>
                       <label className="block font-medium mb-2">Stroke Type</label>
@@ -783,19 +951,38 @@ function App() {
                       />
                     </div>
 
-                    <button
-                      onClick={handleAnalyze}
-                      disabled={uploading || analyzing}
-                      className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-semibold text-lg"
-                    >
-                      {uploading 
-                        ? '⬆️ Uploading frames...' 
-                        : analyzing 
-                          ? analyzingLong 
-                            ? '⏱️ Still analyzing, please wait...'
-                            : '🤖 Analyzing with AI (30-60s)...'
-                          : '🎯 Analyze My Technique'}
-                    </button>
+                    {/* Analyze Button - different for each mode */}
+                    {analysisMode === ANALYSIS_MODES.FRAMES ? (
+                      <button
+                        onClick={handleAnalyze}
+                        disabled={uploading || analyzing}
+                        className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-semibold text-lg"
+                      >
+                        {uploading 
+                          ? '⬆️ Uploading frames...' 
+                          : analyzing 
+                            ? analyzingLong 
+                              ? '⏱️ Still analyzing, please wait...'
+                              : '🤖 Analyzing with AI (30-60s)...'
+                            : '🎯 Analyze My Technique'}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleVideoUpload}
+                        disabled={videoUploading || analyzing}
+                        className="w-full px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-semibold text-lg"
+                      >
+                        {videoUploading || analyzing
+                          ? `🤖 ${agenticProgress || 'Processing...'}`
+                          : '🎬 Analyze with AI Agent'}
+                      </button>
+                    )}
+                    
+                    {analysisMode === ANALYSIS_MODES.VIDEO && (
+                      <p className="text-xs text-center text-gray-500">
+                        AI will review video, request more frames from key moments, and provide timestamp-linked feedback
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -803,15 +990,72 @@ function App() {
               {/* Analysis Results */}
               {analysis && (
                 <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                  <h2 className="text-2xl font-semibold mb-4">📊 Coaching Feedback</h2>
+                  <h2 className="text-2xl font-semibold mb-4">
+                    📊 Coaching Feedback
+                    {analysis.isAgentic && (
+                      <span className="ml-2 text-sm font-normal text-purple-600 bg-purple-50 px-2 py-1 rounded">
+                        🤖 Agentic Analysis
+                      </span>
+                    )}
+                  </h2>
+                  
+                  {/* Analysis metadata */}
+                  {analysis.isAgentic && (
+                    <div className="mb-4 p-3 bg-purple-50 rounded-lg text-sm text-purple-800">
+                      <p>
+                        AI analyzed <strong>{analysis.frame_count}</strong> frames over <strong>{analysis.iterations}</strong> pass{analysis.iterations > 1 ? 'es' : ''}
+                      </p>
+                    </div>
+                  )}
                   
                   <div className="mb-6">
                     <h3 className="font-semibold text-lg mb-2">Summary</h3>
                     <p className="text-gray-700 whitespace-pre-wrap">{analysis.summary}</p>
                   </div>
+                  
+                  {/* Strengths (from agentic analysis) */}
+                  {analysis.strengths && analysis.strengths.length > 0 && (
+                    <div className="mb-6">
+                      <h3 className="font-semibold text-lg mb-2">✨ Strengths</h3>
+                      <ul className="list-disc pl-5 text-gray-700 space-y-1">
+                        {analysis.strengths.map((strength, idx) => (
+                          <li key={idx}>{strength}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
 
+                  {/* Timestamp-linked Feedback (from agentic analysis) */}
+                  {analysis.timestamp_feedback && analysis.timestamp_feedback.length > 0 && (
+                    <div className="mb-6">
+                      <h3 className="font-semibold text-lg mb-3">⏱️ Timestamp Feedback</h3>
+                      <div className="space-y-4">
+                        {analysis.timestamp_feedback.map((item, idx) => (
+                          <div key={idx} className="border-l-4 border-purple-500 pl-4 py-2 bg-purple-50 rounded-r-lg">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-sm font-mono bg-purple-200 text-purple-800 px-2 py-0.5 rounded">
+                                {item.start_formatted} - {item.end_formatted}
+                              </span>
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                                item.priority === 'primary' ? 'bg-red-100 text-red-700' :
+                                item.priority === 'secondary' ? 'bg-yellow-100 text-yellow-700' :
+                                'bg-gray-100 text-gray-700'
+                              }`}>
+                                {item.priority.toUpperCase()}
+                              </span>
+                              <span className="text-sm text-purple-600">{item.category}</span>
+                            </div>
+                            <p className="font-medium text-gray-800 mb-1">{item.observation}</p>
+                            <p className="text-gray-700">{item.recommendation}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Regular feedback (from frame mode) */}
                   {analysis.feedback && analysis.feedback.length > 0 && (
-                    <div>
+                    <div className="mb-6">
                       <h3 className="font-semibold text-lg mb-3">Detailed Feedback</h3>
                       <div className="space-y-4">
                         {analysis.feedback.map((item, idx) => (
@@ -837,6 +1081,18 @@ function App() {
                           </div>
                         ))}
                       </div>
+                    </div>
+                  )}
+                  
+                  {/* Drills (from agentic analysis) */}
+                  {analysis.drills && analysis.drills.length > 0 && (
+                    <div>
+                      <h3 className="font-semibold text-lg mb-2">🏊 Recommended Drills</h3>
+                      <ul className="list-disc pl-5 text-gray-700 space-y-1">
+                        {analysis.drills.map((drill, idx) => (
+                          <li key={idx}>{drill}</li>
+                        ))}
+                      </ul>
                     </div>
                   )}
                 </div>

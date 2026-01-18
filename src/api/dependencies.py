@@ -32,8 +32,15 @@ from ..infrastructure.snowflake.repositories.sessions import (
 from ..infrastructure.snowflake.repositories.usage_limits import UsageLimitRepository
 from ..infrastructure.snowflake.repositories.knowledge import KnowledgeRepository
 from ..infrastructure.storage.client import StorageClient, StorageConfig, create_storage_client
+from ..infrastructure.video.processor import (
+    VideoProcessor,
+    create_video_processor,
+)
 
 logger = logging.getLogger(__name__)
+
+# Global instances for video processor (expensive to create)
+_video_processor = None
 
 # API Key security scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -286,6 +293,52 @@ def get_storage_client(
     return client
 
 
+def get_video_processor(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> VideoProcessor:
+    """
+    Provide video processor for server-side frame extraction.
+    
+    The video processor uses FFmpeg to extract frames from video.
+    In mock mode, returns placeholder frames without FFmpeg.
+    
+    We cache the processor since it validates FFmpeg availability
+    on creation (expensive check).
+    """
+    global _video_processor
+    
+    # determine mock mode from settings or environment
+    mock_mode = settings.video_processor_mock_mode
+    
+    if _video_processor is None:
+        _video_processor = create_video_processor(mock_mode=mock_mode)
+        logger.info(
+            f"Created video processor",
+            extra={"mock_mode": mock_mode}
+        )
+    
+    return _video_processor
+
+
+def get_vision_client(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AnthropicVisionClient:
+    """
+    Provide vision client for image analysis.
+    
+    This is the raw Anthropic client, used by the agentic coach.
+    Separate from SwimCoach for when we need direct vision access.
+    """
+    config = AnthropicConfig(
+        api_key=settings.anthropic_api_key,
+        model=settings.anthropic_model,
+        max_tokens=settings.anthropic_max_tokens,
+        temperature=settings.anthropic_temperature,
+    )
+    
+    return AnthropicVisionClient(config)
+
+
 # ---------------------------------------------------------------------------
 # Convenience Type Aliases
 # ---------------------------------------------------------------------------
@@ -297,5 +350,7 @@ SessionRepositoryDep = Annotated[SessionRepository, Depends(get_session_reposito
 UsageLimitRepositoryDep = Annotated[UsageLimitRepository, Depends(get_usage_limit_repository)]
 KnowledgeRepositoryDep = Annotated[KnowledgeRepository, Depends(get_knowledge_repository)]
 StorageClientDep = Annotated[StorageClient, Depends(get_storage_client)]
+VideoProcessorDep = Annotated[VideoProcessor, Depends(get_video_processor)]
+VisionClientDep = Annotated[AnthropicVisionClient, Depends(get_vision_client)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 

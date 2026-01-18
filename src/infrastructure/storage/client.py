@@ -80,6 +80,22 @@ class StorageClient(Protocol):
     ) -> int:
         """Delete all frames for a session. Returns count deleted."""
         ...
+    
+    async def upload_video(
+        self,
+        video_data: bytes,
+        session_id: UUID,
+        filename: str,
+    ) -> str:
+        """Upload video file and return storage path."""
+        ...
+    
+    async def download_video(
+        self,
+        storage_path: str,
+    ) -> bytes:
+        """Download video data by storage path."""
+        ...
 
 
 class R2StorageClient:
@@ -292,6 +308,78 @@ class R2StorageClient:
     def _build_frame_path(self, session_id: UUID, frame_number: int) -> str:
         """Build storage path for a frame."""
         return f"frames/{session_id}/{frame_number:04d}.jpg"
+    
+    async def upload_video(
+        self,
+        video_data: bytes,
+        session_id: UUID,
+        filename: str,
+    ) -> str:
+        """
+        Upload a video file to R2 storage.
+        
+        Path structure: videos/{session_id}/{filename}
+        Videos are stored separately from frames for easier management.
+        """
+        # get extension from filename, default to mp4
+        ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'mp4'
+        storage_path = f"videos/{session_id}/original.{ext}"
+        
+        # guess content type
+        content_types = {
+            'mp4': 'video/mp4',
+            'mov': 'video/quicktime',
+            'avi': 'video/x-msvideo',
+            'webm': 'video/webm',
+        }
+        content_type = content_types.get(ext.lower(), 'video/mp4')
+        
+        try:
+            self._s3_client.put_object(
+                Bucket=self._config.bucket_name,
+                Key=storage_path,
+                Body=video_data,
+                ContentType=content_type,
+                Metadata={
+                    'session-id': str(session_id),
+                    'original-filename': filename,
+                }
+            )
+            
+            logger.info(
+                "Uploaded video",
+                extra={
+                    "session_id": str(session_id),
+                    "size_bytes": len(video_data),
+                    "storage_path": storage_path,
+                }
+            )
+            
+            return storage_path
+            
+        except Exception as e:
+            logger.error(
+                "Failed to upload video",
+                extra={"session_id": str(session_id), "error": str(e)}
+            )
+            raise StorageError(f"Video upload failed: {e}")
+    
+    async def download_video(self, storage_path: str) -> bytes:
+        """Download video data from R2."""
+        try:
+            response = self._s3_client.get_object(
+                Bucket=self._config.bucket_name,
+                Key=storage_path,
+            )
+            
+            return response['Body'].read()
+            
+        except Exception as e:
+            logger.error(
+                "Failed to download video",
+                extra={"storage_path": storage_path, "error": str(e)}
+            )
+            raise StorageError(f"Video download failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -303,15 +391,16 @@ class MockStorageClient:
     In-memory storage for local development.
     
     This mock enables testing the full API flow without provisioning
-    real object storage. Frames are stored in a dictionary and "URLs"
-    are data URIs.
+    real object storage. Frames and videos are stored in dictionaries
+    and "URLs" are mock URIs.
     
     Not suitable for production, but perfect for development and testing.
     """
     
     def __init__(self) -> None:
-        # Store frames in memory: {storage_path: bytes}
+        # store frames and videos in memory: {storage_path: bytes}
         self._frames: dict[str, bytes] = {}
+        self._videos: dict[str, bytes] = {}
         logger.info("Initialized mock storage client (in-memory)")
     
     async def upload_frame(
@@ -377,6 +466,35 @@ class MockStorageClient:
         )
         
         return len(keys_to_delete)
+    
+    async def upload_video(
+        self,
+        video_data: bytes,
+        session_id: UUID,
+        filename: str,
+    ) -> str:
+        """Store video in memory."""
+        ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'mp4'
+        storage_path = f"videos/{session_id}/original.{ext}"
+        self._videos[storage_path] = video_data
+        
+        logger.debug(
+            "Stored video in mock storage",
+            extra={
+                "session_id": str(session_id),
+                "size_bytes": len(video_data),
+                "storage_path": storage_path,
+            }
+        )
+        
+        return storage_path
+    
+    async def download_video(self, storage_path: str) -> bytes:
+        """Retrieve video from memory."""
+        if storage_path not in self._videos:
+            raise StorageError(f"Video not found: {storage_path}")
+        
+        return self._videos[storage_path]
 
 
 # ---------------------------------------------------------------------------
