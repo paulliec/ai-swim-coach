@@ -474,6 +474,8 @@ function App() {
         drills: analysisData.drills,
         frame_count: analysisData.total_frames_analyzed,
         iterations: analysisData.iterations_used,
+        analysis_progress: analysisData.analysis_progress || [],  // progress from each iteration
+        partial: analysisData.partial || false,  // true if analysis was interrupted
         isAgentic: true  // Flag to render timestamp UI
       })
       
@@ -999,6 +1001,31 @@ function App() {
                     )}
                   </h2>
                   
+                  {/* Partial Results Banner */}
+                  {analysis.partial && (
+                    <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <div className="flex items-start gap-3">
+                        <span className="text-2xl">⚠️</span>
+                        <div className="flex-1">
+                          <p className="font-semibold text-yellow-800 mb-1">Partial Analysis</p>
+                          <p className="text-sm text-yellow-700 mb-2">
+                            The AI hit a rate limit during analysis. Here's what it observed so far.
+                            Try again in 1-2 minutes for the complete analysis.
+                          </p>
+                          <button
+                            onClick={() => {
+                              setAnalysis(null)
+                              setError(null)
+                            }}
+                            className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm font-medium"
+                          >
+                            🔄 Reset and Try Again
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
                   {/* Analysis metadata */}
                   {analysis.isAgentic && (
                     <div className="mb-4 p-3 bg-purple-50 rounded-lg text-sm text-purple-800">
@@ -1006,6 +1033,36 @@ function App() {
                         AI analyzed <strong>{analysis.frame_count}</strong> frames over <strong>{analysis.iterations}</strong> pass{analysis.iterations > 1 ? 'es' : ''}
                       </p>
                     </div>
+                  )}
+                  
+                  {/* Analysis Progress (shows what AI observed at each iteration) */}
+                  {analysis.analysis_progress && analysis.analysis_progress.length > 0 && (
+                    <details className="mb-6 bg-gray-50 rounded-lg p-3">
+                      <summary className="cursor-pointer font-medium text-gray-700 hover:text-gray-900">
+                        📋 Analysis Progress ({analysis.analysis_progress.length} passes) - click to expand
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        {analysis.analysis_progress.map((progress, idx) => (
+                          <div key={idx} className="border-l-2 border-gray-300 pl-3 py-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-xs font-semibold bg-gray-200 text-gray-700 px-2 py-0.5 rounded">
+                                Pass {progress.iteration}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {progress.frames_reviewed} frames reviewed
+                              </span>
+                            </div>
+                            <p className="text-sm text-gray-700 mb-1">{progress.observations}</p>
+                            {progress.areas_requested && progress.areas_requested.length > 0 && (
+                              <div className="text-xs text-purple-600">
+                                <span className="font-medium">Requested closer look:</span>{' '}
+                                {progress.areas_requested.join(' | ')}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   )}
                   
                   <div className="mb-6">

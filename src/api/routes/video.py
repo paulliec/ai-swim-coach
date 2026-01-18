@@ -89,6 +89,17 @@ class AgenticAnalysisRequest(BaseModel):
     )
 
 
+class AnalysisIteration(BaseModel):
+    """Progress from one iteration of the agentic loop."""
+    iteration: int = Field(description="Iteration number (1-based)")
+    frames_reviewed: int = Field(description="Frames reviewed so far")
+    observations: str = Field(description="What the AI observed")
+    areas_requested: list[str] = Field(
+        default_factory=list,
+        description="Timestamp ranges the AI wanted to examine closer"
+    )
+
+
 class AgenticAnalysisResponse(BaseModel):
     """Response with timestamp-linked coaching feedback."""
     session_id: UUID = Field(description="Session identifier")
@@ -101,6 +112,14 @@ class AgenticAnalysisResponse(BaseModel):
     drills: list[str] = Field(description="Recommended drills")
     total_frames_analyzed: int = Field(description="Total frames the AI reviewed")
     iterations_used: int = Field(description="How many analysis passes were needed")
+    analysis_progress: list[AnalysisIteration] = Field(
+        default_factory=list,
+        description="Progress from each iteration (shows what AI observed along the way)"
+    )
+    partial: bool = Field(
+        default=False,
+        description="True if analysis was interrupted (e.g., rate limit) but partial results available"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +419,8 @@ async def analyze_video_agentic(
     all_frames: list[ExtractedFrame] = []
     iterations = 0
     ready_for_final = False
+    analysis_progress: list[AnalysisIteration] = []  # track progress for user feedback
+    last_observations = ""  # keep last observations for partial results
     
     # step 1: extract initial sparse frames
     initial_frames = await video_processor.extract_frames_at_fps(
@@ -443,6 +464,9 @@ Respond in JSON format as instructed."""
         system_prompt += rag_section
     
     # agentic loop
+    import json
+    rate_limit_hit = False
+    
     while iterations < request.max_iterations and not ready_for_final:
         iterations += 1
         
@@ -456,14 +480,21 @@ Respond in JSON format as instructed."""
                 user_prompt=user_prompt,
             )
         except Exception as e:
-            logger.error(f"Vision analysis failed: {e}")
+            error_msg = str(e)
+            logger.error(f"Vision analysis failed: {error_msg}")
+            
+            # check if rate limit - if we have any progress, return partial results
+            if "rate limit" in error_msg.lower() and analysis_progress:
+                rate_limit_hit = True
+                logger.info("Rate limit hit but we have partial results, returning those")
+                break
+            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"AI analysis failed: {str(e)}"
+                detail=f"AI analysis failed: {error_msg}"
             )
         
         # parse response
-        import json
         try:
             # extract JSON from response (might be wrapped in markdown)
             json_str = response
@@ -478,13 +509,37 @@ Respond in JSON format as instructed."""
             ready_for_final = True
             break
         
+        # track this iteration's progress
+        current_observations = analysis.get("observations", analysis.get("summary", "Reviewing footage..."))
+        last_observations = current_observations
+        
+        areas_to_examine = analysis.get("areas_to_examine", [])
+        areas_requested_formatted = [
+            f"{format_timestamp(a.get('timestamp_start', 0))} - {format_timestamp(a.get('timestamp_end', 0))}: {a.get('reason', 'closer look')}"
+            for a in areas_to_examine[:3]
+        ]
+        
+        analysis_progress.append(AnalysisIteration(
+            iteration=iterations,
+            frames_reviewed=len(all_frames),
+            observations=current_observations[:500] if current_observations else "Analyzing...",  # truncate long obs
+            areas_requested=areas_requested_formatted,
+        ))
+        
+        logger.info(
+            f"Iteration {iterations} complete",
+            extra={
+                "observations": current_observations[:100] if current_observations else "",
+                "areas_requested": len(areas_to_examine),
+            }
+        )
+        
         # check if ready for final feedback
         if analysis.get("ready_to_provide_feedback", False):
             ready_for_final = True
             break
         
         # get requested timestamp ranges
-        areas_to_examine = analysis.get("areas_to_examine", [])
         if not areas_to_examine:
             ready_for_final = True
             break
@@ -524,6 +579,22 @@ Continue your analysis. If you have enough information, provide final feedback.
 Otherwise, request more specific timestamp ranges."""
     
     # === FINAL ANALYSIS ===
+    # if rate limit hit during iterations, return partial results instead of failing
+    if rate_limit_hit:
+        logger.info("Returning partial results due to rate limit")
+        return AgenticAnalysisResponse(
+            session_id=session_id,
+            stroke_type=request.stroke_type.value,
+            summary=f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}",
+            strengths=[],
+            timestamp_feedback=[],
+            drills=["Try again in 1-2 minutes for complete analysis"],
+            total_frames_analyzed=len(all_frames),
+            iterations_used=iterations,
+            analysis_progress=analysis_progress,
+            partial=True,
+        )
+    
     # now get the detailed feedback with timestamp references
     final_user_prompt = f"""You've reviewed {len(all_frames)} frames from this {video_info.duration_seconds:.1f}s swimming video.
 
@@ -544,7 +615,25 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             user_prompt=final_user_prompt,
         )
     except Exception as e:
-        logger.error(f"Final analysis failed: {e}")
+        error_msg = str(e)
+        logger.error(f"Final analysis failed: {error_msg}")
+        
+        # if rate limit on final pass, return what we have
+        if "rate limit" in error_msg.lower() and analysis_progress:
+            logger.info("Rate limit on final pass, returning partial results")
+            return AgenticAnalysisResponse(
+                session_id=session_id,
+                stroke_type=request.stroke_type.value,
+                summary=f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}",
+                strengths=[],
+                timestamp_feedback=[],
+                drills=["Try again in 1-2 minutes for complete analysis"],
+                total_frames_analyzed=len(all_frames),
+                iterations_used=iterations,
+                analysis_progress=analysis_progress,
+                partial=True,
+            )
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Final analysis failed"
@@ -603,4 +692,6 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
         drills=final_analysis.get("drills", []),
         total_frames_analyzed=len(all_frames),
         iterations_used=iterations,
+        analysis_progress=analysis_progress,
+        partial=False,
     )
