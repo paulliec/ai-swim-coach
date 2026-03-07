@@ -32,6 +32,15 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
+# Timeout for FFmpeg operations in seconds
+# Fly.io shared VMs can be slow, so we use a generous timeout
+FFMPEG_TIMEOUT_SECONDS = 30
+
+
+class VideoProcessingError(Exception):
+    """Raised when video processing fails."""
+    pass
+
 
 @dataclass
 class VideoInfo:
@@ -231,25 +240,34 @@ class FFmpegVideoProcessor:
                         output_path
                     ]
                     
-                    result = await asyncio.to_thread(
-                        subprocess.run,
-                        cmd,
-                        capture_output=True,
-                        timeout=10
-                    )
-                    
-                    if result.returncode == 0 and os.path.exists(output_path):
-                        with open(output_path, "rb") as f:
-                            frame_data = f.read()
+                    try:
+                        result = await asyncio.to_thread(
+                            subprocess.run,
+                            cmd,
+                            capture_output=True,
+                            timeout=FFMPEG_TIMEOUT_SECONDS
+                        )
                         
-                        frames.append(ExtractedFrame(
-                            timestamp_seconds=ts,
-                            frame_number=i,
-                            data=frame_data,
-                        ))
-                    else:
-                        logger.warning(
-                            f"Failed to extract frame at {ts}s: {result.stderr.decode()}"
+                        if result.returncode == 0 and os.path.exists(output_path):
+                            with open(output_path, "rb") as f:
+                                frame_data = f.read()
+                            
+                            frames.append(ExtractedFrame(
+                                timestamp_seconds=ts,
+                                frame_number=i,
+                                data=frame_data,
+                            ))
+                        else:
+                            logger.warning(
+                                f"Failed to extract frame at {ts}s: {result.stderr.decode()}"
+                            )
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            f"FFmpeg timed out extracting frame at {ts}s after {FFMPEG_TIMEOUT_SECONDS}s"
+                        )
+                        raise VideoProcessingError(
+                            f"Video processing timed out. The video may be too large or in an unsupported format. "
+                            f"Try a shorter video (<2 minutes) or convert to MP4/H.264."
                         )
             
             logger.info(

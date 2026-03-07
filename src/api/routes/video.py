@@ -34,7 +34,7 @@ from ..dependencies import (
     VisionClientDep,
     UsageLimitRepositoryDep,
 )
-from ...infrastructure.video.processor import ExtractedFrame
+from ...infrastructure.video.processor import ExtractedFrame, VideoProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -437,11 +437,19 @@ async def analyze_video_agentic(
     last_observations = ""  # keep last observations for partial results
     
     # step 1: extract initial sparse frames
-    initial_frames = await video_processor.extract_frames_at_fps(
-        video_data=video_data,
-        fps=request.initial_fps,
-        max_frames=30,
-    )
+    try:
+        initial_frames = await video_processor.extract_frames_at_fps(
+            video_data=video_data,
+            fps=request.initial_fps,
+            max_frames=30,
+        )
+    except VideoProcessingError as e:
+        logger.error(f"Video processing failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    
     all_frames.extend(initial_frames)
     
     logger.info(
@@ -582,10 +590,18 @@ Respond in JSON format as instructed."""
                 t += 0.2
         
         if additional_timestamps:
-            new_frames = await video_processor.extract_frames_at_timestamps(
-                video_data=video_data,
-                timestamps=additional_timestamps,
-            )
+            try:
+                new_frames = await video_processor.extract_frames_at_timestamps(
+                    video_data=video_data,
+                    timestamps=additional_timestamps,
+                )
+            except VideoProcessingError as e:
+                logger.error(f"Video processing failed during iteration: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(e)
+                )
+            
             all_frames.extend(new_frames)
             
             logger.info(
@@ -866,10 +882,17 @@ async def resume_video_analysis(
     
     # re-extract the frames we had before
     logger.info(f"Re-extracting {len(saved_frame_timestamps)} frames from saved timestamps")
-    all_frames = await video_processor.extract_frames_at_timestamps(
-        video_data=video_data,
-        timestamps=saved_frame_timestamps,
-    )
+    try:
+        all_frames = await video_processor.extract_frames_at_timestamps(
+            video_data=video_data,
+            timestamps=saved_frame_timestamps,
+        )
+    except VideoProcessingError as e:
+        logger.error(f"Video processing failed during resume: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
     
     # fetch RAG knowledge
     knowledge_context = []
@@ -989,10 +1012,18 @@ Otherwise, request more specific timestamp ranges."""
                     t += 0.2
             
             if additional_timestamps:
-                new_frames = await video_processor.extract_frames_at_timestamps(
-                    video_data=video_data,
-                    timestamps=additional_timestamps,
-                )
+                try:
+                    new_frames = await video_processor.extract_frames_at_timestamps(
+                        video_data=video_data,
+                        timestamps=additional_timestamps,
+                    )
+                except VideoProcessingError as e:
+                    logger.error(f"Video processing failed during resume iteration: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=str(e)
+                    )
+                
                 all_frames.extend(new_frames)
                 
                 frame_descriptions = "\n".join([

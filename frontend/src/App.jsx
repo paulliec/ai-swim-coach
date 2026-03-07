@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { SignIn, UserButton, useUser, SignedIn, SignedOut } from '@clerk/clerk-react'
+import { SignIn, SignInButton, UserButton, useUser, SignedIn, SignedOut } from '@clerk/clerk-react'
 import SessionHistory from './components/SessionHistory'
 
 const STROKE_TYPES = ['freestyle', 'backstroke', 'breaststroke', 'butterfly']
@@ -600,6 +600,14 @@ function App() {
         
         if (res.status === 429) {
           errorMessage = 'High demand right now. Please try again in a few minutes.'
+        } else if (res.status === 404) {
+          // Session not found - likely anonymous user
+          if (!user) {
+            setShowSignupPrompt(true)
+            throw new Error('Session not found. Sign in to save your sessions and ask follow-up questions!')
+          } else {
+            errorMessage = 'Session not found. It may have expired.'
+          }
         } else if (res.status === 500) {
           errorMessage = 'Something went wrong. Please try again.'
         } else {
@@ -1240,6 +1248,39 @@ function App() {
               {analysis && (
                 <div className="bg-white rounded-lg shadow-lg p-6">
                   <h2 className="text-2xl font-semibold mb-4">💬 Ask Follow-up Questions</h2>
+                  
+                  {/* Anonymous user note */}
+                  {!user && (
+                    <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm">
+                      <p className="text-blue-800">
+                        <span className="font-medium">💡 Tip:</span> Sign in to save your sessions and ask follow-up questions later. 
+                        Without an account, your session won't be saved after you leave.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Signup prompt when session not found */}
+                  {showSignupPrompt && !user && (
+                    <div className="mb-4 p-4 bg-amber-50 border border-amber-300 rounded-lg">
+                      <p className="text-amber-800 font-medium mb-2">🔐 Want to continue the conversation?</p>
+                      <p className="text-amber-700 text-sm mb-3">
+                        Create a free account to save your analysis and ask follow-up questions anytime.
+                      </p>
+                      <div className="flex gap-2">
+                        <SignInButton mode="modal">
+                          <button className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium">
+                            Sign Up / Sign In
+                          </button>
+                        </SignInButton>
+                        <button 
+                          onClick={() => setShowSignupPrompt(false)}
+                          className="px-4 py-2 text-amber-700 hover:text-amber-900 text-sm"
+                        >
+                          Maybe later
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   
                   {/* Messages */}
                   <div className="space-y-4 mb-4 max-h-96 overflow-y-auto">

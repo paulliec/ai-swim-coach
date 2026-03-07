@@ -1,0 +1,1 @@
+"""SwimCoach test suite."""
