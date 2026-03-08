@@ -113,11 +113,11 @@ Context provided by the swimmer:
 Please analyze my technique and provide coaching feedback. Focus on what will help me improve most."""
 
 
-FOLLOWUP_CONTEXT_TEMPLATE = """Previous analysis of this swimmer's video:
+FOLLOWUP_CONTEXT_TEMPLATE = """You previously analyzed this swimmer's video and provided coaching feedback. Here is your complete analysis:
 
 {initial_analysis}
 
-The swimmer is now asking follow-up questions. Continue coaching them based on what you observed."""
+The swimmer is now asking follow-up questions. You have full context from your original video analysis above — refer to specific observations, timestamps, and recommendations when answering. Continue coaching them based on what you observed."""
 
 
 # ---------------------------------------------------------------------------

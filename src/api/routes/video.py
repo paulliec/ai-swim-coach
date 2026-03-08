@@ -62,9 +62,13 @@ def _save_agentic_session(
     """
     Persist an agentic analysis result to Snowflake so follow-up
     chat can load the session context.
-    
+
     The agentic analysis returns richer data than the basic AnalysisResult
     model, so we store the summary + feedback in the closest available shape.
+
+    The summary stored here becomes the context for follow-up chat, so we
+    enrich it with the timestamped feedback details to give the AI coach
+    enough context to answer questions without needing the original frames.
     """
     try:
         video = VideoMetadata(
@@ -78,30 +82,50 @@ def _save_agentic_session(
             file_size_bytes=0,
             storage_path=f"videos/{session_id}/original.mp4",
         )
-        
+
         feedback_items = []
+        feedback_lines = []
         for fb in timestamp_feedback:
+            observation_text = getattr(fb, "observation", str(fb))
+            recommendation_text = getattr(fb, "recommendation", "")
+            priority_text = getattr(fb, "priority", "secondary")
+            category_text = getattr(fb, "category", "general")
+            start_fmt = getattr(fb, "start_formatted", "")
+            end_fmt = getattr(fb, "end_formatted", "")
+            timestamp_range = f"{start_fmt}-{end_fmt}" if start_fmt else ""
+
+            # Build a readable line for the enriched summary
+            line = f"- [{priority_text}] {timestamp_range}: {observation_text}"
+            if recommendation_text:
+                line += f" → {recommendation_text}"
+            feedback_lines.append(line)
+
             obs = TechniqueObservation(
                 category=TechniqueCategory.BODY_POSITION,
-                description=getattr(fb, "observation", str(fb)),
+                description=observation_text,
             )
             try:
                 cf = CoachingFeedback(
                     priority=FeedbackPriority.SECONDARY,
                     observation=obs,
-                    recommendation=getattr(fb, "recommendation", ""),
+                    recommendation=recommendation_text,
                 )
                 feedback_items.append(cf)
             except Exception:
                 pass  # skip malformed items
-        
+
+        # Enrich summary with detailed feedback so follow-up chat has full context
+        enriched_summary = summary
+        if feedback_lines:
+            enriched_summary += "\n\nDetailed feedback:\n" + "\n".join(feedback_lines)
+
         analysis = AnalysisResult(
             stroke_type=StrokeType(stroke_type) if stroke_type in [s.value for s in StrokeType] else StrokeType.FREESTYLE,
-            summary=summary,
+            summary=enriched_summary,
             feedback=feedback_items,
             frame_count_analyzed=frame_count,
         )
-        
+
         session = CoachingSession(id=session_id, video=video, analysis=analysis)
         session_repo.save_session(session)
         logger.info(f"Saved agentic session to Snowflake", extra={"session_id": str(session_id)})

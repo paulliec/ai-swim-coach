@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useUser } from '@clerk/clerk-react'
 
-const API_BASE = '/api/v1'
+const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
 function SessionHistory({ onSelectSession }) {
   const { user } = useUser()
@@ -21,19 +21,19 @@ function SessionHistory({ onSelectSession }) {
     setError(null)
     
     try {
-      const res = await fetch(`${API_BASE}/users/me/sessions`, {
+      const res = await fetch(`${API_BASE}/sessions/`, {
         headers: {
           'X-API-Key': apiKey,
           'X-User-Id': user.id
         }
       })
-      
+
       if (!res.ok) {
         throw new Error('Failed to fetch sessions')
       }
-      
+
       const data = await res.json()
-      setSessions(data.sessions || [])
+      setSessions(data || [])
     } catch (err) {
       setError(err.message)
       console.error(err)

@@ -83,6 +83,68 @@ class SessionDetailResponse(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@router.get(
+    "/",
+    response_model=list[SessionDetailResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List user sessions",
+    description="Retrieve recent coaching sessions for the authenticated user",
+)
+async def list_sessions(
+    x_user_id: Annotated[Optional[str], Header()] = None,
+    api_key: AuthenticatedUser = None,
+    repository: SessionRepositoryDep = None,
+) -> list[SessionDetailResponse]:
+    """
+    List recent coaching sessions.
+
+    Returns sessions ordered by most recently updated.
+    Used by the Sessions tab in the frontend.
+    """
+    logger.info(
+        "Listing sessions",
+        extra={"user_id": x_user_id or "anonymous"}
+    )
+
+    try:
+        sessions = repository.list_recent(limit=20)
+    except Exception as e:
+        logger.error(
+            "Failed to list sessions",
+            extra={"error": str(e)}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve sessions"
+        )
+
+    results = []
+    for session in sessions:
+        messages = [
+            MessageItem(
+                role=msg.role,
+                content=msg.content,
+                timestamp=msg.timestamp.isoformat(),
+            )
+            for msg in session.conversation
+        ]
+
+        results.append(SessionDetailResponse(
+            session_id=session.id,
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            has_video=session.has_video,
+            video_filename=session.video.filename if session.video else None,
+            is_analyzed=session.is_analyzed,
+            stroke_type=session.analysis.stroke_type.value if session.analysis else None,
+            summary=session.analysis.summary if session.analysis else None,
+            message_count=len(session.conversation),
+            messages=messages,
+        ))
+
+    return results
+
+
 @router.post(
     "/{session_id}/chat",
     response_model=ChatResponse,
