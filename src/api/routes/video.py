@@ -583,11 +583,10 @@ Respond in JSON format as instructed."""
     import asyncio
     rate_limit_hit = False
     
-    # delay between API calls to avoid rate limiting
-    # this is a simple but effective strategy for agentic flows
-    # TODO: future improvement - check x-ratelimit-remaining-requests headers
-    # and adaptively throttle based on remaining capacity
-    API_CALL_DELAY_SECONDS = 2.0
+    # Delay between API calls to reduce chance of hitting rate limits.
+    # The Anthropic client also retries with exponential backoff (30s/60s/90s)
+    # if a rate limit is hit, so this is a preventive measure.
+    API_CALL_DELAY_SECONDS = 5.0
     
     while iterations < request.max_iterations and not ready_for_final:
         iterations += 1

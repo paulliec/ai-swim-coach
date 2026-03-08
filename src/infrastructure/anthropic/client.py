@@ -11,6 +11,7 @@ The wrapper is intentionally thin. We're not building a general-purpose
 client library — just enough to serve our use case cleanly.
 """
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -18,6 +19,10 @@ from typing import Optional
 
 import anthropic
 from anthropic import APIError, RateLimitError
+
+# Retry configuration for rate limit errors
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BASE_DELAY_SECONDS = 30  # 30s, 60s, 90s
 
 from src.core.analysis.coach import VisionModelClient
 
@@ -72,6 +77,33 @@ class AnthropicVisionClient(VisionModelClient):
         self._config = config
         self._client = anthropic.Anthropic(api_key=config.api_key)
     
+    async def _call_with_retry(self, operation_name: str, api_call):
+        """
+        Call the Anthropic API with exponential backoff on rate limit errors.
+
+        Retries up to RATE_LIMIT_MAX_RETRIES times with increasing delays
+        (30s, 60s, 90s) before giving up. This keeps the request alive
+        server-side so the client doesn't need to poll or resume.
+        """
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                return api_call()
+            except RateLimitError as e:
+                if attempt >= RATE_LIMIT_MAX_RETRIES:
+                    logger.warning(
+                        f"Rate limit: all {RATE_LIMIT_MAX_RETRIES} retries exhausted for {operation_name}",
+                        extra={"error": str(e)},
+                    )
+                    raise RateLimitExceeded("API rate limit exceeded after retries. Please try again later.")
+
+                delay = RATE_LIMIT_BASE_DELAY_SECONDS * (attempt + 1)
+                logger.info(
+                    f"Rate limit hit on {operation_name}, retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{RATE_LIMIT_MAX_RETRIES})",
+                    extra={"error": str(e), "delay": delay},
+                )
+                await asyncio.sleep(delay)
+
     async def analyze_images(
         self,
         images: list[bytes],
@@ -80,18 +112,19 @@ class AnthropicVisionClient(VisionModelClient):
     ) -> str:
         """
         Send images to Claude for analysis.
-        
+
         Images are base64 encoded and sent as part of the user message.
         Claude's vision models can handle multiple images in a single request.
+        Automatically retries with exponential backoff on rate limit errors.
         """
         if not images:
             raise ValueError("At least one image is required")
-        
+
         # Build the content array with images and text
         content = self._build_image_content(images, user_prompt)
-        
-        try:
-            response = self._client.messages.create(
+
+        def _call():
+            return self._client.messages.create(
                 model=self._config.model,
                 max_tokens=self._config.max_tokens,
                 system=system_prompt,
@@ -99,16 +132,16 @@ class AnthropicVisionClient(VisionModelClient):
                     {"role": "user", "content": content}
                 ],
             )
-            
+
+        try:
+            response = await self._call_with_retry("analyze_images", _call)
             return self._extract_text_response(response)
-            
-        except RateLimitError as e:
-            logger.warning("Rate limit hit", extra={"error": str(e)})
-            raise RateLimitExceeded("API rate limit exceeded. Please try again later.")
+        except RateLimitExceeded:
+            raise
         except APIError as e:
             logger.error("API error", extra={"error": str(e), "status": e.status_code})
             raise AnthropicClientError(f"API error: {e.message}")
-    
+
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -116,29 +149,30 @@ class AnthropicVisionClient(VisionModelClient):
     ) -> str:
         """
         Continue a conversation with Claude.
-        
+
         Takes a list of messages in the format:
         [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+        Automatically retries with exponential backoff on rate limit errors.
         """
         if not messages:
             raise ValueError("At least one message is required")
-        
+
         # Validate message format
         validated_messages = self._validate_messages(messages)
-        
-        try:
-            response = self._client.messages.create(
+
+        def _call():
+            return self._client.messages.create(
                 model=self._config.model,
                 max_tokens=self._config.max_tokens,
                 system=system_prompt,
                 messages=validated_messages,
             )
-            
+
+        try:
+            response = await self._call_with_retry("chat", _call)
             return self._extract_text_response(response)
-            
-        except RateLimitError as e:
-            logger.warning("Rate limit hit during chat", extra={"error": str(e)})
-            raise RateLimitExceeded("API rate limit exceeded. Please try again later.")
+        except RateLimitExceeded:
+            raise
         except APIError as e:
             logger.error("API error during chat", extra={"error": str(e)})
             raise AnthropicClientError(f"API error: {e.message}")

@@ -54,7 +54,11 @@ function App() {
   const [videoUploading, setVideoUploading] = useState(false)
   const [videoInfo, setVideoInfo] = useState(null)
   const [agenticProgress, setAgenticProgress] = useState('')
-  
+
+  // Auto-resume countdown for rate-limited analysis
+  const [resumeCountdown, setResumeCountdown] = useState(0)
+  const countdownRef = useRef(null)
+
   const videoRef = useRef(null)
   const fileInputRef = useRef(null)
   const messagesEndRef = useRef(null)
@@ -79,6 +83,41 @@ function App() {
     }
   }, [user, anonymousSessionId])
   
+  // Auto-resume countdown: when analysis returns partial, start a 90s countdown
+  // then automatically call resume. Cleanup on unmount or when analysis changes.
+  useEffect(() => {
+    if (analysis?.partial && analysis?.can_resume && resumeCountdown === 0) {
+      setResumeCountdown(90)
+    }
+    if (!analysis?.partial) {
+      setResumeCountdown(0)
+      if (countdownRef.current) clearInterval(countdownRef.current)
+    }
+  }, [analysis?.partial, analysis?.can_resume])
+
+  useEffect(() => {
+    if (resumeCountdown <= 0) {
+      if (countdownRef.current) clearInterval(countdownRef.current)
+      return
+    }
+
+    countdownRef.current = setInterval(() => {
+      setResumeCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(countdownRef.current)
+          // Auto-resume when countdown reaches 0
+          handleResumeAnalysis()
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current)
+    }
+  }, [resumeCountdown > 0]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Claim anonymous session for authenticated user
   const claimAnonymousSession = async () => {
     if (!user || !anonymousSessionId) return
@@ -1118,36 +1157,68 @@ function App() {
                     )}
                   </h2>
                   
-                  {/* Rate Limit Notice - Friendly and Actionable */}
+                  {/* Deep Analysis Pause — countdown with auto-resume */}
                   {analysis.partial && (
-                    <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                    <div className="mb-6 p-5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg">
                       <div className="flex items-start gap-3">
-                        <span className="text-2xl">⏸️</span>
+                        <div className="text-3xl">
+                          {analyzing ? '🔄' : '🔬'}
+                        </div>
                         <div className="flex-1">
-                          <p className="font-semibold text-blue-900 mb-2">Analysis Paused</p>
-                          <p className="text-sm text-blue-800 mb-3">
-                            We hit a rate limit, but your progress is saved! Give it 1-2 minutes, then we'll automatically try to finish the analysis. 
-                            You can also click Resume below when you're ready.
+                          <p className="font-semibold text-blue-900 mb-1">
+                            {analyzing ? 'Resuming deep analysis...' : 'Deep analysis in progress'}
                           </p>
+                          <p className="text-sm text-blue-800 mb-3">
+                            {analyzing
+                              ? 'Picking up where we left off — finishing your detailed technique review.'
+                              : 'Multi-pass video analysis requires a brief pause between AI review stages to ensure thorough feedback. Your progress is saved.'
+                            }
+                          </p>
+
+                          {/* Countdown timer */}
+                          {!analyzing && resumeCountdown > 0 && (
+                            <div className="mb-3">
+                              <div className="flex items-center gap-3 mb-2">
+                                <div className="flex-1 bg-blue-200 rounded-full h-2 overflow-hidden">
+                                  <div
+                                    className="bg-blue-600 h-full rounded-full transition-all duration-1000 ease-linear"
+                                    style={{ width: `${((90 - resumeCountdown) / 90) * 100}%` }}
+                                  />
+                                </div>
+                                <span className="text-sm font-mono font-semibold text-blue-900 min-w-[3.5rem] text-right">
+                                  {Math.floor(resumeCountdown / 60)}:{(resumeCountdown % 60).toString().padStart(2, '0')}
+                                </span>
+                              </div>
+                              <p className="text-xs text-blue-600">
+                                Auto-resuming in {resumeCountdown}s
+                              </p>
+                            </div>
+                          )}
+
                           <div className="flex gap-2 flex-wrap">
-                            {analysis.can_resume && (
+                            {analysis.can_resume && !analyzing && (
                               <button
-                                onClick={handleResumeAnalysis}
-                                disabled={analyzing}
-                                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 text-sm font-medium"
+                                onClick={() => {
+                                  setResumeCountdown(0)
+                                  handleResumeAnalysis()
+                                }}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
                               >
-                                {analyzing ? '⏳ Resuming...' : '▶️ Resume Now'}
+                                Resume now
                               </button>
                             )}
-                            <button
-                              onClick={() => {
-                                setAnalysis(null)
-                                setError(null)
-                              }}
-                              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm font-medium"
-                            >
-                              Start Over
-                            </button>
+                            {!analyzing && (
+                              <button
+                                onClick={() => {
+                                  setResumeCountdown(0)
+                                  setAnalysis(null)
+                                  setError(null)
+                                }}
+                                className="px-4 py-2 text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-sm"
+                              >
+                                Start over
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
