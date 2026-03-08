@@ -1078,26 +1078,25 @@ function App() {
                     )}
                   </h2>
                   
-                  {/* Partial Results Banner */}
+                  {/* Rate Limit Notice - Friendly and Actionable */}
                   {analysis.partial && (
-                    <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                       <div className="flex items-start gap-3">
-                        <span className="text-2xl">⚠️</span>
+                        <span className="text-2xl">⏸️</span>
                         <div className="flex-1">
-                          <p className="font-semibold text-yellow-800 mb-1">Partial Analysis</p>
-                          <p className="text-sm text-yellow-700 mb-2">
-                            {analysis.can_resume 
-                              ? "The AI hit a rate limit. Your progress is saved! Wait 1-2 minutes then click Resume to continue from where it left off."
-                              : "The AI hit a rate limit during analysis. Here's what it observed so far. Try again in 1-2 minutes for the complete analysis."}
+                          <p className="font-semibold text-blue-900 mb-2">Analysis Paused</p>
+                          <p className="text-sm text-blue-800 mb-3">
+                            We hit a rate limit, but your progress is saved! Give it 1-2 minutes, then we'll automatically try to finish the analysis. 
+                            You can also click Resume below when you're ready.
                           </p>
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 flex-wrap">
                             {analysis.can_resume && (
                               <button
                                 onClick={handleResumeAnalysis}
                                 disabled={analyzing}
                                 className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 text-sm font-medium"
                               >
-                                {analyzing ? '⏳ Resuming...' : '▶️ Resume Analysis'}
+                                {analyzing ? '⏳ Resuming...' : '▶️ Resume Now'}
                               </button>
                             )}
                             <button
@@ -1105,9 +1104,9 @@ function App() {
                                 setAnalysis(null)
                                 setError(null)
                               }}
-                              className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 text-sm font-medium"
+                              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 text-sm font-medium"
                             >
-                              🔄 Start Over
+                              Start Over
                             </button>
                           </div>
                         </div>
@@ -1115,26 +1114,24 @@ function App() {
                     </div>
                   )}
                   
-                  {/* Analysis metadata */}
-                  {analysis.isAgentic && (
-                    <div className="mb-4 p-3 bg-purple-50 rounded-lg text-sm text-purple-800">
-                      <p>
-                        AI analyzed <strong>{analysis.frame_count}</strong> frames over <strong>{analysis.iterations}</strong> pass{analysis.iterations > 1 ? 'es' : ''}
-                      </p>
-                    </div>
-                  )}
-                  
-                  {/* Analysis Progress (shows what AI observed at each iteration) */}
+                  {/* Analysis Progress - More Prominent */}
                   {analysis.analysis_progress && analysis.analysis_progress.length > 0 && (
-                    <details className="mb-6 bg-gray-50 rounded-lg p-3">
-                      <summary className="cursor-pointer font-medium text-gray-700 hover:text-gray-900">
-                        📋 Analysis Progress ({analysis.analysis_progress.length} passes) - click to expand
-                      </summary>
-                      <div className="mt-3 space-y-3">
+                    <div className="mb-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="font-semibold text-lg text-gray-800">
+                          📋 Where We Are ({analysis.analysis_progress.length} pass{analysis.analysis_progress.length > 1 ? 'es' : ''} completed)
+                        </h3>
+                        {analysis.isAgentic && (
+                          <span className="text-sm text-purple-600 bg-purple-50 px-2 py-1 rounded">
+                            {analysis.frame_count} frames analyzed
+                          </span>
+                        )}
+                      </div>
+                      <div className="bg-gray-50 rounded-lg p-4 space-y-3">
                         {analysis.analysis_progress.map((progress, idx) => (
-                          <div key={idx} className="border-l-2 border-gray-300 pl-3 py-1">
+                          <div key={idx} className="border-l-3 border-purple-400 pl-4 py-2 bg-white rounded-r">
                             <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs font-semibold bg-gray-200 text-gray-700 px-2 py-0.5 rounded">
+                              <span className="text-xs font-semibold bg-purple-100 text-purple-700 px-2 py-0.5 rounded">
                                 Pass {progress.iteration}
                               </span>
                               <span className="text-xs text-gray-500">
@@ -1143,15 +1140,24 @@ function App() {
                             </div>
                             <p className="text-sm text-gray-700 mb-1">{progress.observations}</p>
                             {progress.areas_requested && progress.areas_requested.length > 0 && (
-                              <div className="text-xs text-purple-600">
-                                <span className="font-medium">Requested closer look:</span>{' '}
+                              <div className="text-xs text-purple-600 mt-1">
+                                <span className="font-medium">🔍 Requested closer look:</span>{' '}
                                 {progress.areas_requested.join(' | ')}
                               </div>
                             )}
                           </div>
                         ))}
                       </div>
-                    </details>
+                    </div>
+                  )}
+                  
+                  {/* Analysis metadata (if no progress shown) */}
+                  {analysis.isAgentic && !analysis.analysis_progress && (
+                    <div className="mb-4 p-3 bg-purple-50 rounded-lg text-sm text-purple-800">
+                      <p>
+                        AI analyzed <strong>{analysis.frame_count}</strong> frames over <strong>{analysis.iterations}</strong> pass{analysis.iterations > 1 ? 'es' : ''}
+                      </p>
+                    </div>
                   )}
                   
                   <div className="mb-6">
@@ -1249,34 +1255,43 @@ function App() {
                 <div className="bg-white rounded-lg shadow-lg p-6">
                   <h2 className="text-2xl font-semibold mb-4">💬 Ask Follow-up Questions</h2>
                   
-                  {/* Anonymous user note */}
+                  {/* Anonymous user messaging - cohesive with rate limit flow */}
                   {!user && (
-                    <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm">
-                      <p className="text-blue-800">
-                        <span className="font-medium">💡 Tip:</span> Sign in to save your sessions and ask follow-up questions later. 
-                        Without an account, your session won't be saved after you leave.
+                    <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-amber-900 font-medium mb-2">💡 About Your Session</p>
+                      <p className="text-sm text-amber-800 mb-3">
+                        You can ask follow-up questions right now, but <strong>your session won't be saved</strong> after you leave this page. 
+                        If you want to come back later and continue the conversation, sign in to save your analysis.
                       </p>
+                      <p className="text-xs text-amber-700 italic mb-3">
+                        Don't worry - you can always upload your video again for a fresh analysis!
+                      </p>
+                      <SignInButton mode="modal">
+                        <button className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium">
+                          Sign In to Save Session
+                        </button>
+                      </SignInButton>
                     </div>
                   )}
 
-                  {/* Signup prompt when session not found */}
+                  {/* Signup prompt when session not found (trying to chat) */}
                   {showSignupPrompt && !user && (
-                    <div className="mb-4 p-4 bg-amber-50 border border-amber-300 rounded-lg">
-                      <p className="text-amber-800 font-medium mb-2">🔐 Want to continue the conversation?</p>
-                      <p className="text-amber-700 text-sm mb-3">
-                        Create a free account to save your analysis and ask follow-up questions anytime.
+                    <div className="mb-4 p-4 bg-red-50 border border-red-300 rounded-lg">
+                      <p className="text-red-900 font-medium mb-2">⚠️ Session Not Found</p>
+                      <p className="text-sm text-red-800 mb-3">
+                        Your session wasn't saved because you're not signed in. Create a free account to save your analysis and ask follow-up questions anytime.
                       </p>
                       <div className="flex gap-2">
                         <SignInButton mode="modal">
-                          <button className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium">
+                          <button className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium">
                             Sign Up / Sign In
                           </button>
                         </SignInButton>
                         <button 
                           onClick={() => setShowSignupPrompt(false)}
-                          className="px-4 py-2 text-amber-700 hover:text-amber-900 text-sm"
+                          className="px-4 py-2 text-red-700 hover:text-red-900 text-sm"
                         >
-                          Maybe later
+                          Dismiss
                         </button>
                       </div>
                     </div>
