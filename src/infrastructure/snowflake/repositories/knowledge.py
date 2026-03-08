@@ -1,8 +1,5 @@
 """
-Knowledge repository for RAG (Retrieval-Augmented Generation).
-
-This module handles semantic search over the swimming technique knowledge base.
-Uses Snowflake Cortex embeddings for similarity search.
+Knowledge repository for RAG. Semantic search via Snowflake Cortex embeddings.
 """
 
 import logging
@@ -14,12 +11,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class KnowledgeChunk:
-    """
-    A single piece of swimming technique knowledge.
-    
-    Represents one retrieved chunk from the knowledge base,
-    ready to be injected into an AI prompt.
-    """
+    """Retrieved chunk from knowledge base, ready for prompt injection."""
     knowledge_id: str
     source: str
     topic: str
@@ -30,28 +22,9 @@ class KnowledgeChunk:
 
 
 class KnowledgeRepository:
-    """
-    Repository for querying swimming technique knowledge.
-    
-    Uses Snowflake Cortex for semantic search:
-    1. Convert query text to embedding using EMBED_TEXT_768
-    2. Find most similar chunks using vector distance
-    3. Return ranked results
-    
-    Why Snowflake Cortex over a dedicated vector DB:
-    - Already using Snowflake for other data
-    - No additional infrastructure to manage
-    - Built-in embedding function (no external API calls)
-    - Good enough performance for our scale (<1000 chunks)
-    """
-    
+    """Semantic search over swim technique knowledge via Snowflake Cortex."""
+
     def __init__(self, connection) -> None:
-        """
-        Initialize repository with a database connection.
-        
-        Args:
-            connection: Snowflake connection (or mock for testing)
-        """
         self._conn = connection
     
     def search_similar(
@@ -61,40 +34,10 @@ class KnowledgeRepository:
         topic_filter: Optional[str] = None,
         min_score: float = 0.0
     ) -> list[KnowledgeChunk]:
-        """
-        Find knowledge chunks semantically similar to the query.
-        
-        This is the main RAG retrieval method. Given a query like
-        "how do I improve my freestyle catch?", it finds relevant
-        technique knowledge to augment the AI's response.
-        
-        Args:
-            query: Natural language search query
-            limit: Maximum chunks to return (default 5)
-            topic_filter: Optional topic to filter by (e.g., 'freestyle_catch')
-            min_score: Minimum similarity score (0-1, higher = more similar)
-        
-        Returns:
-            List of KnowledgeChunk objects, ranked by similarity
-        
-        Example:
-            chunks = repo.search_similar(
-                query="My elbow keeps dropping during the catch",
-                limit=3,
-                topic_filter="freestyle_catch"
-            )
-            
-            for chunk in chunks:
-                print(f"{chunk.topic}: {chunk.content[:100]}...")
-        """
+        """Semantic search for chunks similar to query. Main RAG retrieval."""
         cursor = self._conn.cursor()
         
         try:
-            # Build the query with optional topic filter
-            # Uses Snowflake Cortex for:
-            # 1. EMBED_TEXT_768 - convert query to embedding vector
-            # 2. VECTOR_COSINE_SIMILARITY - find similar chunks
-            
             if topic_filter:
                 sql = """
                     SELECT 
@@ -140,8 +83,7 @@ class KnowledgeRepository:
             chunks = []
             for row in results:
                 score = float(row[6]) if row[6] else 0.0
-                
-                # Filter by minimum score
+
                 if score < min_score:
                     continue
                 
@@ -171,7 +113,6 @@ class KnowledgeRepository:
                 "Knowledge search failed",
                 extra={"query": query[:100], "error": str(e)}
             )
-            # Return empty list on error - don't break the main flow
             return []
         
         finally:
@@ -182,31 +123,10 @@ class KnowledgeRepository:
         topics: list[str],
         limit_per_topic: int = 2
     ) -> list[KnowledgeChunk]:
-        """
-        Get knowledge chunks for specific topics.
-        
-        Unlike search_similar(), this does exact topic matching.
-        Useful when you know what topics are relevant based on
-        the stroke type or detected issues.
-        
-        Args:
-            topics: List of topic names (e.g., ['freestyle_catch', 'freestyle_pull'])
-            limit_per_topic: Max chunks per topic
-        
-        Returns:
-            List of KnowledgeChunk objects
-        
-        Example:
-            # Get knowledge for freestyle stroke analysis
-            chunks = repo.search_by_topics(
-                topics=['freestyle_body_position', 'freestyle_catch', 'freestyle_breathing'],
-                limit_per_topic=2
-            )
-        """
+        """Exact topic matching (vs semantic). For known-relevant topics."""
         cursor = self._conn.cursor()
         
         try:
-            # Build placeholders for IN clause
             placeholders = ', '.join(['%s'] * len(topics))
             
             sql = f"""
@@ -226,7 +146,6 @@ class KnowledgeRepository:
             cursor.execute(sql, tuple(topics))
             results = cursor.fetchall()
             
-            # Group by topic and limit
             topic_counts = {}
             chunks = []
             
@@ -265,22 +184,7 @@ class KnowledgeRepository:
         analysis_summary: Optional[str] = None,
         limit: int = 5
     ) -> list[KnowledgeChunk]:
-        """
-        Get relevant knowledge for a specific stroke analysis.
-        
-        High-level method that combines topic-based and semantic search.
-        Used by the coach to get relevant technique knowledge before
-        generating coaching feedback.
-        
-        Args:
-            stroke_type: The stroke being analyzed (freestyle, backstroke, etc.)
-            analysis_summary: Optional summary text to use for semantic search
-            limit: Maximum total chunks to return
-        
-        Returns:
-            List of KnowledgeChunk objects, most relevant first
-        """
-        # Map stroke types to topic prefixes
+        """Combines topic + semantic search for a stroke analysis."""
         stroke_topic_prefixes = {
             'freestyle': ['freestyle_', 'drills'],
             'backstroke': ['backstroke_', 'drills'],
@@ -292,17 +196,14 @@ class KnowledgeRepository:
         prefixes = stroke_topic_prefixes.get(stroke_lower, ['drills'])
         
         if analysis_summary:
-            # Use semantic search with the analysis summary
             return self.search_similar(
                 query=analysis_summary,
                 limit=limit
             )
         else:
-            # Fall back to topic-based search
             cursor = self._conn.cursor()
-            
+
             try:
-                # Get topics matching our stroke
                 like_clauses = ' OR '.join([f"topic LIKE %s" for _ in prefixes])
                 params = tuple(f"{p}%" for p in prefixes)
                 
@@ -348,12 +249,6 @@ class KnowledgeRepository:
                 cursor.close()
     
     def get_chunk_by_id(self, knowledge_id: str) -> Optional[KnowledgeChunk]:
-        """
-        Get a specific knowledge chunk by ID.
-        
-        Useful for debugging or when you need to reference
-        specific content.
-        """
         cursor = self._conn.cursor()
         
         try:
@@ -389,7 +284,6 @@ class KnowledgeRepository:
             cursor.close()
     
     def count_chunks(self) -> int:
-        """Get total number of knowledge chunks in the database."""
         cursor = self._conn.cursor()
         
         try:

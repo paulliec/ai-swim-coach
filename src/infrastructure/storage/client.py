@@ -1,14 +1,7 @@
 """
 Object storage client for video frames.
 
-Supports Cloudflare R2 (S3-compatible) with mock mode for local development.
-Using R2 instead of S3 because:
-- No egress fees (important for video delivery)
-- Tighter integration with Cloudflare Workers
-- Same S3 API means we could swap to actual S3 if needed
-
-Mock mode stores frames in memory, enabling API testing without
-provisioning actual object storage.
+R2 over S3 — cheaper egress for video. Mock mode for local dev.
 """
 
 import io
@@ -28,14 +21,7 @@ class StorageError(Exception):
 
 @dataclass
 class StorageConfig:
-    """
-    Configuration for R2/S3-compatible storage.
-    
-    Using a dataclass instead of raw parameters means:
-    - Configuration is explicit and documented
-    - Easy to validate at construction time
-    - Simple to create test configurations
-    """
+    """R2/S3-compatible storage configuration."""
     access_key_id: str
     secret_access_key: str
     bucket_name: str
@@ -44,12 +30,7 @@ class StorageConfig:
 
 
 class StorageClient(Protocol):
-    """
-    Protocol for object storage operations.
-    
-    Using a protocol means tests can provide mocks and we can
-    swap storage backends without changing dependent code.
-    """
+    """Protocol for object storage operations."""
     
     async def upload_frame(
         self,
@@ -122,27 +103,10 @@ class StorageClient(Protocol):
 
 
 class R2StorageClient:
-    """
-    Cloudflare R2 object storage client.
-    
-    Uses boto3 because R2 is S3-compatible. This abstraction means
-    we could swap to actual S3, MinIO, or other S3-compatible storage
-    with minimal changes.
-    
-    All methods are async to match the Protocol even though boto3 is
-    synchronous. This keeps the interface consistent with truly async
-    storage clients and prevents blocking the event loop in the future.
-    """
-    
+    """Cloudflare R2 client via boto3. Async interface wrapping sync S3 calls."""
+
     def __init__(self, config: StorageConfig) -> None:
-        """
-        Initialize R2 client with boto3.
-        
-        We import boto3 here (not at module level) because:
-        - Mock mode doesn't need it
-        - Explicit about when the dependency is required
-        - Makes testing easier
-        """
+        # Import here — mock mode doesn't need boto3
         try:
             import boto3
             from botocore.config import Config
@@ -152,9 +116,7 @@ class R2StorageClient:
             )
         
         self._config = config
-        
-        # Configure boto3 for R2
-        # R2 requires v4 signatures and has specific endpoint patterns
+
         boto_config = Config(
             signature_version='s3v4',
             s3={'addressing_style': 'path'},
@@ -183,15 +145,7 @@ class R2StorageClient:
         session_id: UUID,
         frame_number: int,
     ) -> str:
-        """
-        Upload a frame to R2 storage.
-        
-        Path structure: frames/{session_id}/{frame_number:04d}.jpg
-        Using session_id in path enables:
-        - Easy cleanup of all frames for a session
-        - Natural grouping in storage
-        - Simple URL patterns for retrieval
-        """
+        """Upload frame to R2. Path: frames/{session_id}/{frame:04d}.jpg"""
         storage_path = self._build_frame_path(session_id, frame_number)
         
         try:
@@ -200,7 +154,6 @@ class R2StorageClient:
                 Key=storage_path,
                 Body=frame_data,
                 ContentType='image/jpeg',
-                # Metadata for debugging and analytics
                 Metadata={
                     'session-id': str(session_id),
                     'frame-number': str(frame_number),
@@ -251,16 +204,7 @@ class R2StorageClient:
         storage_path: str,
         expiry_seconds: int = 3600,
     ) -> str:
-        """
-        Generate a temporary download URL.
-        
-        Presigned URLs enable:
-        - Direct client downloads without routing through API
-        - Time-limited access (security)
-        - Reduced API server load
-        
-        Default 1-hour expiry is reasonable for viewing sessions.
-        """
+        """Generate temporary download URL (default 1hr expiry)."""
         try:
             url = self._s3_client.generate_presigned_url(
                 'get_object',
@@ -281,16 +225,10 @@ class R2StorageClient:
             raise StorageError(f"Presigned URL generation failed: {e}")
     
     async def delete_frames(self, session_id: UUID) -> int:
-        """
-        Delete all frames for a session.
-        
-        Used for cleanup after analysis or when user deletes a session.
-        Returns count of deleted objects.
-        """
+        """Delete all frames for a session. Returns count deleted."""
         prefix = f"frames/{session_id}/"
-        
+
         try:
-            # List all objects with the session prefix
             response = self._s3_client.list_objects_v2(
                 Bucket=self._config.bucket_name,
                 Prefix=prefix,
@@ -299,7 +237,6 @@ class R2StorageClient:
             if 'Contents' not in response:
                 return 0
             
-            # Delete in batch
             objects_to_delete = [
                 {'Key': obj['Key']}
                 for obj in response['Contents']
@@ -338,17 +275,10 @@ class R2StorageClient:
         session_id: UUID,
         filename: str,
     ) -> str:
-        """
-        Upload a video file to R2 storage.
-        
-        Path structure: videos/{session_id}/{filename}
-        Videos are stored separately from frames for easier management.
-        """
-        # get extension from filename, default to mp4
+        """Upload video to R2. Path: videos/{session_id}/original.{ext}"""
         ext = filename.rsplit('.', 1)[-1] if '.' in filename else 'mp4'
         storage_path = f"videos/{session_id}/original.{ext}"
-        
-        # guess content type
+
         content_types = {
             'mp4': 'video/mp4',
             'mov': 'video/quicktime',
@@ -409,12 +339,7 @@ class R2StorageClient:
         session_id: UUID,
         state: dict[str, Any],
     ) -> str:
-        """
-        Save agentic analysis state for resume capability.
-        
-        Stored as JSON alongside the video, enabling resume if
-        analysis is interrupted (e.g., by rate limits).
-        """
+        """Save analysis state as JSON — enables resume on interruption."""
         storage_path = f"videos/{session_id}/analysis_state.json"
         
         try:
@@ -466,10 +391,8 @@ class R2StorageClient:
             return state
             
         except self._s3_client.exceptions.NoSuchKey:
-            logger.debug(f"No analysis state found for session {session_id}")
             return None
         except Exception as e:
-            # check if it's a "not found" type error
             if 'NoSuchKey' in str(e) or '404' in str(e):
                 return None
             logger.error(
@@ -507,18 +430,9 @@ class R2StorageClient:
 # ---------------------------------------------------------------------------
 
 class MockStorageClient:
-    """
-    In-memory storage for local development.
-    
-    This mock enables testing the full API flow without provisioning
-    real object storage. Frames and videos are stored in dictionaries
-    and "URLs" are mock URIs.
-    
-    Not suitable for production, but perfect for development and testing.
-    """
-    
+    """In-memory storage for local dev and testing."""
+
     def __init__(self) -> None:
-        # store frames, videos, and state in memory: {storage_path: bytes}
         self._frames: dict[str, bytes] = {}
         self._videos: dict[str, bytes] = {}
         self._states: dict[str, dict[str, Any]] = {}  # {session_id: state}
@@ -557,13 +471,7 @@ class MockStorageClient:
         storage_path: str,
         expiry_seconds: int = 3600,
     ) -> str:
-        """
-        Return a mock URL for the frame.
-        
-        In real usage, this would be a presigned URL. For mock mode,
-        we return a placeholder. In a more sophisticated mock, we could
-        return a data URI with the actual image data.
-        """
+        """Return mock:// URL placeholder."""
         if storage_path not in self._frames:
             raise StorageError(f"Frame not found: {storage_path}")
         
@@ -653,21 +561,7 @@ def create_storage_client(
     config: Optional[StorageConfig] = None,
     mock_mode: bool = False,
 ) -> StorageClient:
-    """
-    Create storage client based on configuration.
-    
-    Factory function pattern because:
-    - Centralizes client creation logic
-    - Makes mock vs real decision explicit
-    - Simplifies dependency injection in FastAPI
-    
-    Args:
-        config: Storage configuration (required if not mock_mode)
-        mock_mode: If True, return mock client for testing
-    
-    Returns:
-        StorageClient implementation (R2 or Mock)
-    """
+    """Factory: returns R2 or mock client."""
     if mock_mode:
         return MockStorageClient()
     

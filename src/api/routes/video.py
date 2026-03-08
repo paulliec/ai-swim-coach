@@ -1,19 +1,7 @@
 """
 Video-based analysis API endpoints (server-side processing).
 
-This is the agentic analysis flow:
-1. User uploads video → stored in R2
-2. Server extracts initial frames (sparse)
-3. AI analyzes and identifies areas needing more detail
-4. Server extracts additional frames at requested timestamps
-5. AI re-analyzes with full context
-6. Returns feedback with timestamp references
-
-Why this flow:
-- Works on all browsers (no Safari headaches)
-- AI can request specific moments ("show me 0:12-0:15")
-- Enables timestamp-linked feedback like a real coach
-- Separates upload from analysis for better UX
+Agentic flow: upload video → sparse scan → AI requests specific frames → detailed analysis.
 """
 
 import logging
@@ -59,17 +47,7 @@ def _save_agentic_session(
     timestamp_feedback: list,
     frame_count: int,
 ) -> None:
-    """
-    Persist an agentic analysis result to Snowflake so follow-up
-    chat can load the session context.
-
-    The agentic analysis returns richer data than the basic AnalysisResult
-    model, so we store the summary + feedback in the closest available shape.
-
-    The summary stored here becomes the context for follow-up chat, so we
-    enrich it with the timestamped feedback details to give the AI coach
-    enough context to answer questions without needing the original frames.
-    """
+    """Save agentic result to Snowflake. Enriches summary with feedback for follow-up chat context."""
     try:
         video = VideoMetadata(
             filename=f"session_{session_id}.mp4",
@@ -94,7 +72,6 @@ def _save_agentic_session(
             end_fmt = getattr(fb, "end_formatted", "")
             timestamp_range = f"{start_fmt}-{end_fmt}" if start_fmt else ""
 
-            # Build a readable line for the enriched summary
             line = f"- [{priority_text}] {timestamp_range}: {observation_text}"
             if recommendation_text:
                 line += f" → {recommendation_text}"
@@ -114,7 +91,6 @@ def _save_agentic_session(
             except Exception:
                 pass  # skip malformed items
 
-        # Enrich summary with detailed feedback so follow-up chat has full context
         enriched_summary = summary
         if feedback_lines:
             enriched_summary += "\n\nDetailed feedback:\n" + "\n".join(feedback_lines)
@@ -305,16 +281,7 @@ async def upload_video(
     video_processor: VideoProcessorDep = None,
     settings: SettingsDep = None,
 ) -> VideoUploadResponse:
-    """
-    Upload a video for server-side analysis.
-    
-    The video is stored in R2 and metadata is extracted via FFmpeg.
-    Returns a session_id for subsequent analysis.
-    
-    Max file size: configured in settings (default 100MB)
-    Supported formats: MP4, MOV, AVI, WebM
-    """
-    # validate file type
+    """Upload video, extract metadata, return session ID."""
     allowed_types = ["video/mp4", "video/quicktime", "video/x-msvideo", "video/webm"]
     if video.content_type and video.content_type not in allowed_types:
         raise HTTPException(
@@ -334,10 +301,8 @@ async def upload_video(
         }
     )
     
-    # read video data
     video_data = await video.read()
-    
-    # check size
+
     max_size_bytes = settings.max_video_size_mb * 1024 * 1024
     if len(video_data) > max_size_bytes:
         raise HTTPException(
@@ -345,7 +310,6 @@ async def upload_video(
             detail=f"Video too large. Maximum size: {settings.max_video_size_mb}MB"
         )
     
-    # get video metadata
     try:
         video_info = await video_processor.get_video_info(video_data)
         
@@ -365,15 +329,13 @@ async def upload_video(
             detail=f"Could not process video: {str(e)}"
         )
     
-    # check duration (limit to 2 minutes for now)
-    max_duration = 120.0  # 2 minutes
+    max_duration = 120.0
     if video_info.duration_seconds > max_duration:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Video too long ({video_info.duration_seconds:.0f}s). Maximum: {max_duration:.0f}s"
         )
     
-    # store in R2
     try:
         video_path = await storage.upload_video(
             video_data=video_data,
@@ -428,21 +390,7 @@ async def analyze_video_agentic(
     usage_limit_repo: UsageLimitRepositoryDep = None,
     session_repo: SessionRepositoryDep = None,
 ) -> AgenticAnalysisResponse:
-    """
-    Perform agentic video analysis.
-    
-    This endpoint:
-    1. Downloads the video from R2
-    2. Extracts initial sparse frames
-    3. AI reviews and requests more frames from specific timestamps
-    4. Extracts additional frames at requested timestamps
-    5. AI provides final feedback with timestamp references
-    
-    The agentic loop continues until:
-    - AI says it has enough information
-    - Max iterations reached
-    - No more frames requested
-    """
+    """Perform agentic video analysis: sparse scan, AI-driven frame requests, detailed feedback."""
     logger.info(
         "Starting agentic analysis",
         extra={
@@ -452,7 +400,6 @@ async def analyze_video_agentic(
         }
     )
     
-    # rate limit check - bypass for trusted API keys, user IDs, or emails
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
@@ -461,7 +408,6 @@ async def analyze_video_agentic(
         bypass_rate_limit = True
         logger.info(f"Rate limit bypassed for user ID {x_user_id}")
     
-    # also check email header if provided
     x_user_email = fastapi_request.headers.get("x-user-email", "").lower()
     if x_user_email and x_user_email in settings.rate_limit_bypass_emails_list:
         bypass_rate_limit = True
@@ -487,12 +433,10 @@ async def analyze_video_agentic(
                 detail=f"Daily limit reached ({limit_max} analyses). Come back tomorrow!"
             )
     
-    # download video from storage
-    video_path = f"videos/{session_id}/original.mp4"  # assume mp4 for now
+    video_path = f"videos/{session_id}/original.mp4"
     try:
         video_data = await storage.download_video(video_path)
     except Exception as e:
-        # try other extensions
         for ext in ["mov", "avi", "webm"]:
             try:
                 video_path = f"videos/{session_id}/original.{ext}"
@@ -507,10 +451,8 @@ async def analyze_video_agentic(
                 detail="Video not found. Upload a video first."
             )
     
-    # get video info
     video_info = await video_processor.get_video_info(video_data)
-    
-    # fetch RAG knowledge
+
     knowledge_context = []
     try:
         knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
@@ -522,14 +464,12 @@ async def analyze_video_agentic(
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
     
-    # === AGENTIC LOOP ===
     all_frames: list[ExtractedFrame] = []
     iterations = 0
     ready_for_final = False
     analysis_progress: list[AnalysisIteration] = []  # track progress for user feedback
     last_observations = ""  # keep last observations for partial results
     
-    # step 1: extract initial sparse frames
     try:
         initial_frames = await video_processor.extract_frames_at_fps(
             video_data=video_data,
@@ -550,7 +490,6 @@ async def analyze_video_agentic(
         extra={"count": len(initial_frames), "fps": request.initial_fps}
     )
     
-    # build initial prompt with frame timestamps
     frame_descriptions = "\n".join([
         f"- Frame {i+1}: timestamp {f.timestamp_formatted} ({f.timestamp_seconds:.2f}s)"
         for i, f in enumerate(initial_frames)
@@ -570,7 +509,6 @@ Review these frames and tell me:
 
 Respond in JSON format as instructed."""
 
-    # add knowledge context if available
     system_prompt = INITIAL_ANALYSIS_SYSTEM_PROMPT
     if knowledge_context:
         rag_section = "\n\nReference knowledge:\n" + "\n".join(
@@ -578,25 +516,20 @@ Respond in JSON format as instructed."""
         )
         system_prompt += rag_section
     
-    # agentic loop
     import json
     import asyncio
     rate_limit_hit = False
-    
-    # Delay between API calls to reduce chance of hitting rate limits.
-    # The Anthropic client also retries with exponential backoff (30s/60s/90s)
-    # if a rate limit is hit, so this is a preventive measure.
+
+    # Preventive throttle; Anthropic client also retries with backoff if rate-limited.
     API_CALL_DELAY_SECONDS = 5.0
     
     while iterations < request.max_iterations and not ready_for_final:
         iterations += 1
         
-        # add delay between iterations (skip first iteration)
         if iterations > 1:
             logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before next API call")
             await asyncio.sleep(API_CALL_DELAY_SECONDS)
         
-        # send frames to vision model
         frame_images = [f.data for f in all_frames]
         
         try:
@@ -620,9 +553,7 @@ Respond in JSON format as instructed."""
                 detail=f"AI analysis failed: {error_msg}"
             )
         
-        # parse response
         try:
-            # extract JSON from response (might be wrapped in markdown)
             json_str = response
             if "```json" in response:
                 json_str = response.split("```json")[1].split("```")[0]
@@ -635,7 +566,6 @@ Respond in JSON format as instructed."""
             ready_for_final = True
             break
         
-        # track this iteration's progress
         current_observations = analysis.get("observations", analysis.get("summary", "Reviewing footage..."))
         last_observations = current_observations
         
@@ -660,17 +590,14 @@ Respond in JSON format as instructed."""
             }
         )
         
-        # check if ready for final feedback
         if analysis.get("ready_to_provide_feedback", False):
             ready_for_final = True
             break
         
-        # get requested timestamp ranges
         if not areas_to_examine:
             ready_for_final = True
             break
         
-        # extract additional frames at requested timestamps
         additional_timestamps = []
         for area in areas_to_examine[:3]:  # limit to 3 areas per iteration
             start = area.get("timestamp_start", 0)
@@ -701,7 +628,6 @@ Respond in JSON format as instructed."""
                 extra={"count": len(new_frames), "timestamps": additional_timestamps[:5]}
             )
             
-            # update prompt for next iteration
             frame_descriptions = "\n".join([
                 f"- Frame {i+1}: {f.timestamp_formatted}"
                 for i, f in enumerate(all_frames)
@@ -712,12 +638,9 @@ Respond in JSON format as instructed."""
 Continue your analysis. If you have enough information, provide final feedback.
 Otherwise, request more specific timestamp ranges."""
     
-    # === FINAL ANALYSIS ===
-    # if rate limit hit during iterations, save state and return partial results
     if rate_limit_hit:
         logger.info("Returning partial results due to rate limit, saving state for resume")
         
-        # save state for resume capability
         state_to_save = {
             "iteration": iterations,
             "frame_timestamps": [f.timestamp_seconds for f in all_frames],
@@ -754,8 +677,6 @@ Otherwise, request more specific timestamp ranges."""
             can_resume=can_resume,
         )
     
-    # now get the detailed feedback with timestamp references
-    # add delay before final API call to avoid rate limiting
     logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before final analysis")
     await asyncio.sleep(API_CALL_DELAY_SECONDS)
     
@@ -781,11 +702,9 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
         error_msg = str(e)
         logger.error(f"Final analysis failed: {error_msg}")
         
-        # if rate limit on final pass, save state and return what we have
         if "rate limit" in error_msg.lower() and analysis_progress:
             logger.info("Rate limit on final pass, saving state for resume")
             
-            # save state - mark as ready_for_final since iterations completed
             state_to_save = {
                 "iteration": iterations,
                 "frame_timestamps": [f.timestamp_seconds for f in all_frames],
@@ -795,7 +714,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
                 "user_notes": request.user_notes,
                 "initial_fps": request.initial_fps,
                 "max_iterations": request.max_iterations,
-                "ready_for_final": True,  # iterations completed, just need final pass
+                "ready_for_final": True,
                 "video_duration": video_info.duration_seconds,
             }
             try:
@@ -827,17 +746,15 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             detail="Final analysis failed"
         )
     
-    # parse final response
     try:
         json_str = final_response
         if "```json" in final_response:
             json_str = final_response.split("```json")[1].split("```")[0]
         elif "```" in final_response:
             json_str = final_response.split("```")[1].split("```")[0]
-        
+
         final_analysis = json.loads(json_str.strip())
     except json.JSONDecodeError:
-        # fallback: use raw response as summary
         final_analysis = {
             "summary": final_response,
             "strengths": [],
@@ -845,7 +762,6 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             "drills": [],
         }
     
-    # build response
     timestamp_feedback = []
     for fb in final_analysis.get("timestamp_feedback", []):
         start = fb.get("start_timestamp", 0)
@@ -860,8 +776,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             recommendation=fb.get("recommendation", ""),
             priority=fb.get("priority", "secondary"),
         ))
-    
-    # clean up any saved state since analysis completed successfully
+
     try:
         await storage.delete_analysis_state(session_id)
     except Exception:
@@ -869,7 +784,6 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
     
     final_summary = final_analysis.get("summary", "")
     
-    # save session to Snowflake so follow-up chat works
     if session_repo:
         _save_agentic_session(
             session_repo, session_id, video_info,
@@ -923,17 +837,9 @@ async def resume_video_analysis(
     usage_limit_repo: UsageLimitRepositoryDep = None,
     session_repo: SessionRepositoryDep = None,
 ) -> AgenticAnalysisResponse:
-    """
-    Resume an interrupted agentic analysis.
-    
-    This endpoint loads saved state from a previous analysis that was
-    interrupted (e.g., by rate limiting) and continues from where it left off.
-    
-    If no saved state exists, returns an error.
-    """
+    """Resume an interrupted agentic analysis from saved state."""
     logger.info(f"Attempting to resume analysis for session {session_id}")
     
-    # load saved state
     saved_state = await storage.load_analysis_state(session_id)
     
     if not saved_state:
@@ -951,10 +857,8 @@ async def resume_video_analysis(
         }
     )
     
-    # rate limit check (don't count against limit if resuming)
     bypass_rate_limit = True  # resuming is free - they already paid for this analysis
     
-    # download video from storage
     video_path = f"videos/{session_id}/original.mp4"
     try:
         video_data = await storage.download_video(video_path)
@@ -971,10 +875,9 @@ async def resume_video_analysis(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Video not found. Upload a video first."
             )
-    
+
     video_info = await video_processor.get_video_info(video_data)
-    
-    # restore state
+
     saved_iteration = saved_state.get("iteration", 0)
     saved_frame_timestamps = saved_state.get("frame_timestamps", [])
     saved_observations = saved_state.get("observations", "")
@@ -984,12 +887,10 @@ async def resume_video_analysis(
     max_iterations = saved_state.get("max_iterations", 3)
     ready_for_final = saved_state.get("ready_for_final", False)
     
-    # restore analysis_progress from saved state
     analysis_progress = [
         AnalysisIteration(**p) for p in saved_progress
     ]
     
-    # re-extract the frames we had before
     logger.info(f"Re-extracting {len(saved_frame_timestamps)} frames from saved timestamps")
     try:
         all_frames = await video_processor.extract_frames_at_timestamps(
@@ -1003,7 +904,6 @@ async def resume_video_analysis(
             detail=str(e)
         )
     
-    # fetch RAG knowledge
     knowledge_context = []
     try:
         knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
@@ -1015,13 +915,11 @@ async def resume_video_analysis(
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
     
-    # if ready for final, skip straight to final analysis
     if ready_for_final:
         logger.info("Resuming at final analysis stage")
     else:
         logger.info(f"Resuming at iteration {saved_iteration + 1}")
     
-    # continue from where we left off
     import json
     import asyncio
     rate_limit_hit = False
@@ -1036,7 +934,6 @@ async def resume_video_analysis(
         )
         system_prompt += rag_section
     
-    # continue agentic loop if not ready for final
     if not ready_for_final:
         frame_descriptions = "\n".join([
             f"- Frame {i+1}: {f.timestamp_formatted}"
@@ -1053,7 +950,6 @@ Otherwise, request more specific timestamp ranges."""
         while iterations < max_iterations and not ready_for_final:
             iterations += 1
             
-            # throttle
             logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before API call")
             await asyncio.sleep(API_CALL_DELAY_SECONDS)
             
@@ -1078,7 +974,6 @@ Otherwise, request more specific timestamp ranges."""
                     detail=f"AI analysis failed: {error_msg}"
                 )
             
-            # parse response
             try:
                 json_str = response
                 if "```json" in response:
@@ -1110,7 +1005,6 @@ Otherwise, request more specific timestamp ranges."""
                 ready_for_final = True
                 break
             
-            # extract more frames
             additional_timestamps = []
             for area in areas_to_examine[:3]:
                 start = area.get("timestamp_start", 0)
@@ -1145,7 +1039,6 @@ Otherwise, request more specific timestamp ranges."""
 Continue your analysis. If you have enough information, provide final feedback.
 Otherwise, request more specific timestamp ranges."""
     
-    # check if rate limit hit again during resume
     if rate_limit_hit:
         logger.info("Rate limit hit again during resume, saving state")
         state_to_save = {
@@ -1181,10 +1074,9 @@ Otherwise, request more specific timestamp ranges."""
             can_resume=can_resume,
         )
     
-    # === FINAL ANALYSIS ===
     logger.info(f"Throttling: waiting {API_CALL_DELAY_SECONDS}s before final analysis")
     await asyncio.sleep(API_CALL_DELAY_SECONDS)
-    
+
     final_user_prompt = f"""You've reviewed {len(all_frames)} frames from this {video_info.duration_seconds:.1f}s swimming video.
 
 Stroke: {stroke_type}
@@ -1245,7 +1137,6 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             detail="Final analysis failed"
         )
     
-    # parse final response
     try:
         json_str = final_response
         if "```json" in final_response:
@@ -1260,8 +1151,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             "timestamp_feedback": [],
             "drills": [],
         }
-    
-    # build response
+
     timestamp_feedback = []
     for fb in final_analysis.get("timestamp_feedback", []):
         start = fb.get("start_timestamp", 0)
@@ -1277,17 +1167,14 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
             priority=fb.get("priority", "secondary"),
         ))
     
-    # clean up saved state
     try:
         await storage.delete_analysis_state(session_id)
     except:
         pass
-    
+
     resume_summary = final_analysis.get("summary", "")
-    
-    # save session so follow-up chat works
+
     if session_repo:
-        # build a minimal video_info-like object from saved state
         class _VideoInfo:
             duration_seconds = saved_state.get("video_duration", 0.0)
             width = 0

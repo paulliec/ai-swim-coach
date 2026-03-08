@@ -1,23 +1,8 @@
 """
-Agentic swim coach that iteratively analyzes video.
+Agentic swim coach — multi-pass video analysis.
 
-This module implements the "coach in a box" vision:
-1. Initial sparse pass - look at video overview
-2. Identify areas needing closer inspection
-3. Request specific frames at specific timestamps
-4. Re-analyze with additional detail
-5. Provide timestamp-linked feedback
-
-This mimics how a real coach works:
-- Watch the full video to get context
-- Rewind to specific moments that need attention
-- Provide feedback referencing exact timestamps
-
-Why agentic instead of single-pass:
-- Can focus on problem areas (not waste tokens on perfect technique)
-- Provides timestamp-specific feedback like a human coach
-- More thorough analysis with same token budget
-- Sets up for future multi-model approach (Claude coaching + Gemini vision)
+Two passes: cheap wide scan first, targeted detail second.
+Mimics how a real coach reviews video.
 """
 
 import json
@@ -246,16 +231,7 @@ Respond in the same JSON format."""
 # ---------------------------------------------------------------------------
 
 class AgenticSwimCoach:
-    """
-    Multi-pass swim coach that iteratively analyzes video.
-    
-    This coach:
-    1. Does an initial sparse analysis
-    2. Requests more frames if needed
-    3. Provides timestamp-linked feedback
-    
-    Max iterations prevent infinite loops while allowing thorough analysis.
-    """
+    """Multi-pass coach: sparse scan, then targeted frame requests."""
     
     def __init__(
         self,
@@ -279,19 +255,7 @@ class AgenticSwimCoach:
         user_notes: str = "",
         knowledge_context: list[str] | None = None,
     ) -> AgenticAnalysisResult:
-        """
-        Perform multi-pass analysis of video.
-        
-        Args:
-            video_data: Raw video bytes
-            video_duration: Video length in seconds
-            stroke_type: Type of stroke being analyzed
-            user_notes: Optional context from swimmer
-            knowledge_context: Optional RAG knowledge chunks
-        
-        Returns:
-            AgenticAnalysisResult with timestamped feedback
-        """
+        """Multi-pass analysis: sparse overview → targeted detail → timestamped feedback."""
         session_id = uuid4()
         result = AgenticAnalysisResult(
             session_id=session_id,
@@ -299,7 +263,6 @@ class AgenticSwimCoach:
             video_duration_seconds=video_duration,
         )
         
-        # Initial sparse extraction
         logger.info(
             "Starting agentic analysis",
             extra={
@@ -327,7 +290,6 @@ class AgenticSwimCoach:
                 }
             )
             
-            # Build prompt with frame context
             frame_context = self._build_frame_context(
                 [(ts, i) for i, (ts, _) in enumerate(current_frames)],
                 video_duration,
@@ -341,7 +303,6 @@ class AgenticSwimCoach:
                 video_duration=video_duration,
             )
             
-            # Build system prompt with optional RAG
             system_prompt = AGENTIC_SYSTEM_PROMPT
             if knowledge_context:
                 rag_content = "\n".join(f"- {chunk}" for chunk in knowledge_context)
@@ -354,7 +315,6 @@ Use this reference material to inform your coaching:
 
 {system_prompt}"""
             
-            # Send frames to vision model
             frame_bytes = [data for _, data in current_frames]
             
             response = await self._vision_client.analyze_images(
@@ -363,10 +323,8 @@ Use this reference material to inform your coaching:
                 user_prompt=user_prompt,
             )
             
-            # Parse response
             parsed = self._parse_response(response)
-            
-            # Record iteration
+
             iter_record = AgentIteration(
                 iteration_number=iteration + 1,
                 frames_analyzed=len(current_frames),
@@ -386,7 +344,6 @@ Use this reference material to inform your coaching:
             result.iterations.append(iter_record)
             result.total_frames_analyzed += len(current_frames)
             
-            # Check if we need more frames
             if not parsed.get("need_more_frames", False):
                 logger.info(
                     "Agent satisfied, completing analysis",
@@ -394,7 +351,6 @@ Use this reference material to inform your coaching:
                 )
                 break
             
-            # Extract requested frames
             frame_requests = parsed.get("frame_requests", [])
             if not frame_requests:
                 break
@@ -407,8 +363,7 @@ Use this reference material to inform your coaching:
                     fps=min(req.get("fps", 2.0), 5.0),  # cap at 5 fps
                     reason=req.get("reason", ""),
                 ).timestamps
-                
-                # Filter out already-analyzed timestamps
+
                 new_timestamps = [
                     ts for ts in timestamps 
                     if ts not in all_analyzed_timestamps
@@ -429,7 +384,6 @@ Use this reference material to inform your coaching:
                 )
                 break
             
-            # Combine with representative frames from previous iterations
             current_frames = new_frames
             
             logger.info(
@@ -440,7 +394,6 @@ Use this reference material to inform your coaching:
                 }
             )
         
-        # Compile final feedback from all iterations
         result.timestamped_feedback = self._compile_feedback(result.iterations)
         result.final_summary = self._compile_summary(result.iterations)
         
@@ -461,7 +414,6 @@ Use this reference material to inform your coaching:
         frame_info: list[tuple[float, int]],
         video_duration: float,
     ) -> str:
-        """Build description of which frames are being analyzed."""
         lines = [f"Video duration: {video_duration:.1f} seconds"]
         lines.append(f"Analyzing {len(frame_info)} frames at these timestamps:")
         
@@ -478,7 +430,6 @@ Use this reference material to inform your coaching:
         user_notes: str,
         video_duration: float,
     ) -> str:
-        """Build user prompt for the vision model."""
         if iteration == 0:
             prompt = f"""I'm uploading frames from a swimming video for analysis.
 
@@ -495,19 +446,15 @@ Please analyze my technique. If you need to see specific moments more closely, r
         return prompt
     
     def _parse_response(self, response: str) -> dict:
-        """Parse JSON response from the model."""
-        # try to extract JSON from the response
-        # the model might wrap it in markdown code blocks
+        """Parse JSON from model response (handles markdown code blocks)."""
         json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
-            # try to find raw JSON
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
             else:
-                # fallback: treat whole response as summary
                 return {
                     "summary": response,
                     "need_more_frames": False,
@@ -525,7 +472,6 @@ Please analyze my technique. If you need to see specific moments more closely, r
             }
     
     def _parse_feedback(self, parsed: dict) -> list[TimestampedFeedback]:
-        """Extract feedback items from parsed response."""
         items = []
         
         for fb in parsed.get("feedback", []):
@@ -555,15 +501,11 @@ Please analyze my technique. If you need to see specific moments more closely, r
         self,
         iterations: list[AgentIteration],
     ) -> list[TimestampedFeedback]:
-        """Compile feedback from all iterations, deduplicating."""
-        # take feedback from the last iteration as it's the most refined
+        """Deduplicate feedback across iterations, prefer latest."""
         if not iterations:
             return []
         
-        # start with last iteration's feedback
         feedback = list(iterations[-1].feedback_items)
-        
-        # add any unique feedback from earlier iterations
         seen_descriptions = {f.description for f in feedback}
         
         for iter_record in iterations[:-1]:
@@ -572,7 +514,6 @@ Please analyze my technique. If you need to see specific moments more closely, r
                     feedback.append(fb)
                     seen_descriptions.add(fb.description)
         
-        # sort by priority then timestamp
         priority_order = {
             FeedbackPriority.PRIMARY: 0,
             FeedbackPriority.SECONDARY: 1,
@@ -583,14 +524,10 @@ Please analyze my technique. If you need to see specific moments more closely, r
         return feedback
     
     def _compile_summary(self, iterations: list[AgentIteration]) -> str:
-        """Compile final summary from iterations."""
         if not iterations:
             return "No analysis completed."
         
-        # use last iteration's summary as base
         summaries = [iterations[-1].response_summary]
-        
-        # add context about the analysis process
         total_frames = sum(it.frames_analyzed for it in iterations)
         summaries.append(
             f"\n\nAnalyzed {total_frames} frames across {len(iterations)} passes "

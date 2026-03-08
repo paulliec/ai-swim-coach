@@ -1,22 +1,7 @@
 """
-Video processing service using FFmpeg.
+Video processing via FFmpeg.
 
-This module handles server-side video processing for the agentic analysis flow:
-1. Extract video metadata (duration, fps, resolution)
-2. Extract frames at specific timestamps (for AI to request "show me 0:12-0:15")
-3. Extract frames at regular intervals (initial sparse pass)
-
-Why server-side processing instead of client-side:
-- Works on all browsers (no Safari headaches)
-- More control over frame quality and timing
-- Enables AI to request specific frames on demand
-- Consistent results regardless of client device
-
-Why FFmpeg:
-- Industry standard, battle-tested
-- Handles any video format
-- Fast and efficient
-- Available everywhere (including Docker)
+Server-side so the AI can request specific frames on demand.
 """
 
 import asyncio
@@ -32,8 +17,7 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-# Timeout for FFmpeg operations in seconds
-# Fly.io shared VMs can be slow, so we use a generous timeout
+# Generous timeout — Fly.io shared VMs can be slow
 FFMPEG_TIMEOUT_SECONDS = 30
 
 
@@ -94,26 +78,12 @@ class VideoProcessor(Protocol):
 
 
 class FFmpegVideoProcessor:
-    """
-    Video processor using FFmpeg/FFprobe.
-    
-    All operations use temporary files because FFmpeg works best with
-    file paths. We write the video data to a temp file, process it,
-    read the output, then clean up.
-    """
-    
+    """FFmpeg/FFprobe video processor. Uses temp files for all operations."""
+
     def __init__(self, ffmpeg_path: str = "ffmpeg", ffprobe_path: str = "ffprobe"):
-        """
-        Initialize processor with FFmpeg paths.
-        
-        Args:
-            ffmpeg_path: Path to ffmpeg binary (default assumes it's in PATH)
-            ffprobe_path: Path to ffprobe binary
-        """
         self._ffmpeg = ffmpeg_path
         self._ffprobe = ffprobe_path
-        
-        # verify ffmpeg is available
+
         try:
             result = subprocess.run(
                 [self._ffmpeg, "-version"],
@@ -130,18 +100,12 @@ class FFmpegVideoProcessor:
             )
     
     async def get_video_info(self, video_data: bytes) -> VideoInfo:
-        """
-        Extract video metadata using FFprobe.
-        
-        FFprobe outputs JSON with stream info - we parse that to get
-        duration, resolution, fps, codec.
-        """
+        """Extract metadata via FFprobe."""
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp.write(video_data)
             tmp_path = tmp.name
         
         try:
-            # run ffprobe to get video info as JSON
             cmd = [
                 self._ffprobe,
                 "-v", "quiet",
@@ -163,8 +127,7 @@ class FFmpegVideoProcessor:
                 raise RuntimeError(f"FFprobe failed: {result.stderr}")
             
             info = json.loads(result.stdout)
-            
-            # find video stream
+
             video_stream = None
             for stream in info.get("streams", []):
                 if stream.get("codec_type") == "video":
@@ -174,7 +137,7 @@ class FFmpegVideoProcessor:
             if not video_stream:
                 raise RuntimeError("No video stream found")
             
-            # parse fps (can be a fraction like "30000/1001")
+            # fps can be a fraction like "30000/1001"
             fps_str = video_stream.get("r_frame_rate", "30/1")
             if "/" in fps_str:
                 num, denom = fps_str.split("/")
@@ -182,7 +145,6 @@ class FFmpegVideoProcessor:
             else:
                 fps = float(fps_str)
             
-            # get duration from format or stream
             duration = float(info.get("format", {}).get("duration", 0))
             if duration == 0:
                 duration = float(video_stream.get("duration", 0))
@@ -204,15 +166,7 @@ class FFmpegVideoProcessor:
         video_data: bytes,
         timestamps: list[float],
     ) -> list[ExtractedFrame]:
-        """
-        Extract frames at specific timestamps.
-        
-        This is the key method for agentic analysis - the AI can say
-        "show me frames at 0:12, 0:13, 0:14" and we extract just those.
-        
-        Uses FFmpeg's -ss (seek) option for each timestamp, outputting
-        a single JPEG per timestamp.
-        """
+        """Extract specific frames — key method for agentic analysis."""
         if not timestamps:
             return []
         
@@ -226,10 +180,7 @@ class FFmpegVideoProcessor:
             with tempfile.TemporaryDirectory() as output_dir:
                 for i, ts in enumerate(timestamps):
                     output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
-                    
-                    # -ss before -i for fast seeking
-                    # -frames:v 1 to extract just one frame
-                    # -q:v 2 for good jpeg quality
+
                     cmd = [
                         self._ffmpeg,
                         "-ss", str(ts),
@@ -286,21 +237,9 @@ class FFmpegVideoProcessor:
         fps: float,
         max_frames: int = 60,
     ) -> list[ExtractedFrame]:
-        """
-        Extract frames at regular intervals.
-        
-        Used for the initial analysis pass - extract every 0.5 seconds
-        (or whatever fps is set to) to get a sparse overview.
-        
-        Args:
-            video_data: Raw video bytes
-            fps: Frames per second to extract (e.g., 0.5 = one every 2 seconds)
-            max_frames: Maximum number of frames to extract
-        """
-        # first get video duration
+        """Extract frames at regular intervals for initial sparse pass."""
         info = await self.get_video_info(video_data)
-        
-        # calculate timestamps
+
         interval = 1.0 / fps
         timestamps = []
         t = 0.0
@@ -321,18 +260,12 @@ class FFmpegVideoProcessor:
 
 
 class MockVideoProcessor:
-    """
-    Mock video processor for local development without FFmpeg.
-    
-    Returns dummy video info and placeholder frames. Useful for
-    testing the API flow without actual video processing.
-    """
+    """Mock processor for local dev without FFmpeg. Returns placeholder frames."""
     
     def __init__(self):
         logger.info("Initialized mock video processor")
     
     async def get_video_info(self, video_data: bytes) -> VideoInfo:
-        """Return dummy video info."""
         return VideoInfo(
             duration_seconds=30.0,
             width=1920,
@@ -347,9 +280,7 @@ class MockVideoProcessor:
         video_data: bytes,
         timestamps: list[float],
     ) -> list[ExtractedFrame]:
-        """Return placeholder frames."""
-        # create tiny 1x1 red jpeg for each timestamp
-        # this is a valid minimal JPEG
+        # Valid minimal 1x1 JPEG
         minimal_jpeg = bytes([
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46,
             0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
@@ -411,8 +342,6 @@ class MockVideoProcessor:
         fps: float,
         max_frames: int = 60,
     ) -> list[ExtractedFrame]:
-        """Return placeholder frames at intervals."""
-        # assume 30 second video
         duration = 30.0
         interval = 1.0 / fps
         timestamps = []
@@ -425,15 +354,7 @@ class MockVideoProcessor:
 
 
 def create_video_processor(mock_mode: bool = False) -> VideoProcessor:
-    """
-    Factory function for video processor.
-    
-    Args:
-        mock_mode: If True, return mock processor (no FFmpeg required)
-    
-    Returns:
-        VideoProcessor implementation
-    """
+    """Factory: returns FFmpeg or mock processor."""
     if mock_mode:
         return MockVideoProcessor()
     

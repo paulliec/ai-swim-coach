@@ -1,9 +1,7 @@
 """
 Domain models for swim technique analysis.
 
-These models represent the core business concepts. They have no dependencies
-on external frameworks, databases, or APIs. This is intentional — the domain
-should be expressible without knowing how it's stored or transmitted.
+Pure domain objects — no framework, database, or API dependencies.
 """
 
 from dataclasses import dataclass, field
@@ -23,12 +21,7 @@ class StrokeType(Enum):
 
 
 class TechniqueCategory(Enum):
-    """
-    High-level categories for technique observations.
-    
-    These map to how coaches think about stroke mechanics,
-    not to how the AI happens to structure its output.
-    """
+    """Categories for technique observations, mapped to coaching terminology."""
     BODY_POSITION = "body_position"
     CATCH_AND_PULL = "catch_and_pull"
     RECOVERY = "recovery"
@@ -40,12 +33,7 @@ class TechniqueCategory(Enum):
 
 
 class FeedbackPriority(Enum):
-    """
-    How important is this feedback?
-    
-    A good coach doesn't dump everything at once. They prioritize
-    what will have the most impact for this swimmer right now.
-    """
+    """Prioritize what helps most right now."""
     PRIMARY = "primary"      # Fix this first
     SECONDARY = "secondary"  # Address after primary issues improve
     REFINEMENT = "refinement"  # Nice to have, for advanced swimmers
@@ -53,12 +41,7 @@ class FeedbackPriority(Enum):
 
 @dataclass(frozen=True)
 class Timestamp:
-    """
-    A point in time within a video.
-    
-    Frozen because timestamps are values, not entities.
-    Two timestamps at the same position are the same timestamp.
-    """
+    """A point in time within a video. Value object (frozen)."""
     seconds: float
     
     def __post_init__(self) -> None:
@@ -90,11 +73,7 @@ class TimeRange:
 
 @dataclass
 class TechniqueObservation:
-    """
-    A single observation about the swimmer's technique.
-    
-    This is what the AI "sees" — a specific thing at a specific time.
-    """
+    """What the AI sees — a specific thing at a specific time."""
     category: TechniqueCategory
     description: str
     time_range: Optional[TimeRange] = None  # None if applies to whole video
@@ -106,15 +85,7 @@ class TechniqueObservation:
 
 @dataclass
 class CoachingFeedback:
-    """
-    Actionable coaching advice derived from observations.
-    
-    The distinction between Observation and Feedback matters:
-    - Observation: "Your elbow drops below your wrist at the catch"
-    - Feedback: "Focus on leading with a high elbow. Try the fingertip drag drill."
-    
-    Observations are what we see. Feedback is what to do about it.
-    """
+    """Actionable advice: observation (what we see) + recommendation (what to do)."""
     id: UUID = field(default_factory=uuid4)
     priority: FeedbackPriority = FeedbackPriority.SECONDARY
     observation: TechniqueObservation = field(default_factory=lambda: TechniqueObservation(
@@ -131,12 +102,7 @@ class CoachingFeedback:
 
 @dataclass
 class VideoMetadata:
-    """
-    Information about an uploaded video.
-    
-    Separate from the video content itself — this is what we know
-    about the file without analyzing the swimming.
-    """
+    """File-level info about an uploaded video (not swimming analysis)."""
     id: UUID = field(default_factory=uuid4)
     filename: str = ""
     duration_seconds: float = 0.0
@@ -153,12 +119,7 @@ class VideoMetadata:
 
 @dataclass
 class AnalysisResult:
-    """
-    The complete result of analyzing a video.
-    
-    This is the output of the analysis service — everything we
-    learned from looking at the footage.
-    """
+    """Everything we learned from analyzing the footage."""
     id: UUID = field(default_factory=uuid4)
     video_id: UUID = field(default_factory=uuid4)
     stroke_type: StrokeType = StrokeType.FREESTYLE
@@ -185,12 +146,7 @@ class ChatMessage:
 
 @dataclass
 class CoachingSession:
-    """
-    A complete coaching interaction.
-    
-    This is the aggregate root for a coaching session — it owns
-    the video, the analysis, and the conversation that follows.
-    """
+    """Aggregate root: video + analysis + conversation."""
     id: UUID = field(default_factory=uuid4)
     video: Optional[VideoMetadata] = None
     analysis: Optional[AnalysisResult] = None

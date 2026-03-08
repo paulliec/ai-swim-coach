@@ -1,15 +1,7 @@
 """
 Video analysis API endpoints.
 
-Handles the core workflow:
-1. Client uploads frames (POST /upload)
-2. Server analyzes frames with AI (POST /{session_id}/analyze)
-3. Client receives coaching feedback
-
-Frames are uploaded separately from analysis to support:
-- Progress indicators during upload
-- Validation before expensive AI calls
-- Separation of upload and processing infrastructure
+Upload frames, then analyze with AI.
 """
 
 import logging
@@ -108,24 +100,7 @@ async def upload_frames(
     repository: SessionRepositoryDep = None,
     settings: SettingsDep = None,
 ) -> FrameUploadResponse:
-    """
-    Upload frames for a new coaching session.
-    
-    This endpoint:
-    1. Validates frame count and sizes
-    2. Creates a new session
-    3. Stores frames in object storage
-    4. Saves session metadata to database
-    5. Returns session ID for subsequent analysis
-    
-    Frames should be JPEGs extracted from video at key moments.
-    The client is responsible for frame extraction because:
-    - Keeps server logic simple
-    - Enables client-side preview
-    - Reduces server processing load
-    - Works with any video format the client supports
-    """
-    # Validate frame count
+    """Upload frames, create session, return session ID for analysis."""
     if not frames:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -138,7 +113,6 @@ async def upload_frames(
             detail=f"Maximum {settings.max_frames_per_upload} frames allowed"
         )
     
-    # Create new session
     session_id = uuid4()
     
     logger.info(
@@ -151,18 +125,15 @@ async def upload_frames(
         }
     )
     
-    # Upload frames to storage
     storage_paths: list[str] = []
     total_size = 0
     
     try:
         for i, frame in enumerate(frames):
-            # Read frame data
             frame_data = await frame.read()
             frame_size = len(frame_data)
             total_size += frame_size
             
-            # Check total size
             max_size_bytes = settings.max_upload_size_mb * 1024 * 1024
             if total_size > max_size_bytes:
                 raise HTTPException(
@@ -170,14 +141,12 @@ async def upload_frames(
                     detail=f"Total upload size exceeds {settings.max_upload_size_mb}MB"
                 )
             
-            # Validate it's actually an image (basic check)
             if not frame.content_type or not frame.content_type.startswith("image/"):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Frame {i} is not an image (got {frame.content_type})"
                 )
             
-            # Upload to storage
             storage_path = await storage.upload_frame(
                 frame_data=frame_data,
                 session_id=session_id,
@@ -196,7 +165,6 @@ async def upload_frames(
             )
     
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
         logger.error(
@@ -208,25 +176,21 @@ async def upload_frames(
             detail=f"Upload failed: {str(e)}"
         )
     
-    # Create session in database
     try:
-        # Create minimal video metadata (we don't have full video info since client sent frames)
         video = VideoMetadata(
             filename=f"session_{session_id}_frames.zip",
-            duration_seconds=0.0,  # Unknown without full video
-            resolution=(0, 0),  # Unknown
-            fps=0.0,  # Unknown
+            duration_seconds=0.0,
+            resolution=(0, 0),
+            fps=0.0,
             file_size_bytes=total_size,
             storage_path=f"frames/{session_id}/",
         )
         
-        # Create session
         session = CoachingSession(
             id=session_id,
             video=video,
         )
-        
-        # Save to database
+
         repository.save_session(session)
         
         logger.info(
@@ -276,31 +240,7 @@ async def analyze_session(
     usage_limit_repo: UsageLimitRepositoryDep = None,
     knowledge_repo: KnowledgeRepositoryDep = None,
 ) -> AnalysisResponse:
-    """
-    Analyze frames and generate coaching feedback.
-    
-    This is the expensive operation - it:
-    1. Checks rate limits (3 per day per user/IP, unless bypassed)
-    2. Loads frames from storage
-    3. Sends them to Claude for analysis
-    4. Parses the response into structured feedback
-    5. Saves results to database
-    
-    Rate Limiting:
-    - Default: 3 analyses per day per user (Clerk ID) or IP address
-    - Bypass: API keys in RATE_LIMIT_BYPASS_KEYS skip rate limiting
-    - Future: Email addresses in RATE_LIMIT_BYPASS_EMAILS will also bypass
-    
-    The analysis can take 10-30 seconds depending on:
-    - Number of frames
-    - Model performance
-    - API latency
-    
-    In production, you might want to:
-    - Make this async with a job queue
-    - Add progress updates via websocket
-    - Implement timeouts
-    """
+    """Analyze frames with AI. Rate-limited (3/day per user unless bypassed)."""
     logger.info(
         "Starting analysis",
         extra={
@@ -309,7 +249,6 @@ async def analyze_session(
         }
     )
     
-    # Check if API key, user ID, or email bypasses rate limiting
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
@@ -321,20 +260,16 @@ async def analyze_session(
         bypass_rate_limit = True
         logger.info(f"Rate limit bypassed for user ID {x_user_id}")
     
-    # also check email header if provided
     x_user_email = fastapi_request.headers.get("x-user-email", "").lower()
     if x_user_email and x_user_email in settings.rate_limit_bypass_emails_list:
         bypass_rate_limit = True
         logger.info(f"Rate limit bypassed for email {x_user_email}")
     
-    # Check rate limits (3 analyses per day per user/IP) unless bypassed
     if not bypass_rate_limit:
-        # Use user ID if authenticated, otherwise use IP address
         if x_user_id:
             identifier = x_user_id
             identifier_type = "user_id"
         else:
-            # Get client IP from request
             identifier = fastapi_request.client.host if fastapi_request.client else "unknown"
             identifier_type = "ip_address"
         
@@ -342,7 +277,7 @@ async def analyze_session(
             identifier=identifier,
             identifier_type=identifier_type,
             resource_type="video_analysis",
-            limit_max=3,  # 3 analyses per day
+            limit_max=3,
             period_hours=24
         )
         
@@ -370,7 +305,6 @@ async def analyze_session(
             }
         )
     
-    # Load session
     try:
         session = repository.get_session(session_id)
     except Exception as e:
@@ -383,30 +317,25 @@ async def analyze_session(
             detail="Session not found"
         )
     
-    # Check if already analyzed
     if session.is_analyzed:
         logger.warning(
             "Session already analyzed",
             extra={"session_id": str(session_id)}
         )
-        # Could return existing analysis or reject - for now we allow re-analysis
-    
-    # Load frames from storage
-    # We need to know which frames exist - in real implementation, this would be tracked
-    # For now, try to load frames 0-19 (max we allow)
+        # TODO: fix later - should return existing analysis or reject re-analysis
+
+    # TODO: fix later - frame count should be tracked, not guessed
     frame_data: list[bytes] = []
     frame_timestamps: list[float] = []
     
     try:
-        for frame_num in range(20):  # Try up to max frames
+        for frame_num in range(20):
             try:
                 storage_path = f"frames/{session_id}/{frame_num:04d}.jpg"
                 data = await storage.download_frame(storage_path)
                 frame_data.append(data)
-                # Estimate timestamp based on frame number (assume 0.5s apart)
                 frame_timestamps.append(frame_num * 0.5)
             except Exception:
-                # Frame doesn't exist, we're done
                 break
         
         if not frame_data:
@@ -432,7 +361,7 @@ async def analyze_session(
             detail="Failed to load frames"
         )
     
-    # Fetch relevant knowledge for RAG (optional - gracefully degrades if no knowledge)
+    # RAG is optional — gracefully degrades if no knowledge
     knowledge_context: list[str] = []
     try:
         knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
@@ -452,13 +381,11 @@ async def analyze_session(
                 }
             )
     except Exception as e:
-        # RAG is optional - don't fail the analysis if it fails
         logger.warning(
             "RAG knowledge retrieval failed, proceeding without",
             extra={"session_id": str(session_id), "error": str(e)}
         )
     
-    # Analyze with AI
     try:
         frames = FrameSet(frames=frame_data, timestamps_seconds=frame_timestamps)
         
@@ -469,7 +396,6 @@ async def analyze_session(
             knowledge_context=knowledge_context if knowledge_context else None,
         )
         
-        # Update session with analysis
         session.analysis = analysis
         repository.save_session(session)
         
@@ -491,7 +417,6 @@ async def analyze_session(
             detail=f"Analysis failed: {str(e)}"
         )
     
-    # Convert to response format
     feedback_items = [
         FeedbackItem(
             priority=fb.priority.value,

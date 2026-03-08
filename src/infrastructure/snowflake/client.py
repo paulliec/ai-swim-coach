@@ -1,12 +1,7 @@
 """
-Snowflake database connection management.
+Snowflake connection management.
 
-Provides connection factory and context manager for Snowflake operations.
-Includes mock mode with in-memory storage for local development.
-
-Using the repository pattern means most code never touches this module
-directly - it goes through SessionRepository which handles the translation
-between domain models and database rows.
+Mock mode with in-memory storage for local dev.
 """
 
 import logging
@@ -28,35 +23,11 @@ class SnowflakeConnectionError(Exception):
 
 
 def _load_private_key(key_path: Optional[str] = None, key_base64: Optional[str] = None):
-    """
-    Load private key from file path or base64 string.
-    
-    Snowflake requires the private key as a bytes object.
-    
-    This function supports two input methods:
-    - key_path: Read from a file (for local development)
-    - key_base64: Decode from base64 string (for deployment/Fly.io)
-    
-    Why support base64:
-    - Fly.io and other cloud platforms make it easy to set env vars
-    - Harder to securely upload files to ephemeral containers
-    - Base64 encoding preserves the key format in environment variables
-    
-    Args:
-        key_path: Path to PEM-encoded private key file
-        key_base64: Base64-encoded PEM private key string
-    
-    Returns:
-        Private key bytes in DER/PKCS8 format (Snowflake-compatible)
-    
-    Raises:
-        ValueError: If neither key_path nor key_base64 is provided
-    """
+    """Load PEM key from file or base64 env var, return DER/PKCS8 bytes for Snowflake."""
     import base64
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import serialization
     
-    # Load key bytes from either source
     if key_base64:
         logger.info("Loading private key from base64-encoded environment variable")
         key_bytes = base64.b64decode(key_base64)
@@ -67,14 +38,12 @@ def _load_private_key(key_path: Optional[str] = None, key_base64: Optional[str] 
     else:
         raise ValueError("Either key_path or key_base64 must be provided for key-pair authentication")
     
-    # Parse the PEM-encoded key
     private_key = serialization.load_pem_private_key(
         key_bytes,
-        password=None,  # No password on the key
+        password=None,
         backend=default_backend()
     )
-    
-    # Convert to the format Snowflake expects (DER/PKCS8)
+
     private_key_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
@@ -86,26 +55,7 @@ def _load_private_key(key_path: Optional[str] = None, key_base64: Optional[str] 
 
 @contextmanager
 def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConnection, None, None]:
-    """
-    Provide Snowflake connection with automatic cleanup.
-    
-    Supports multiple authentication methods:
-    - Key-pair auth (base64): Set private_key_base64 (preferred for deployment)
-    - Key-pair auth (file): Set private_key_path (local development)
-    - Password auth: Set password
-    
-    Priority order: private_key_base64 > private_key_path > password
-    
-    Using a context manager ensures connections are always closed,
-    even if an exception occurs. This prevents connection leaks which
-    can exhaust Snowflake's connection pool.
-    
-    Usage:
-        with get_snowflake_connection(config) as conn:
-            cursor = conn.cursor()
-            # do work
-            conn.commit()
-    """
+    """Context-managed Snowflake connection. Auth priority: key_base64 > key_path > password."""
     try:
         import snowflake.connector
     except ImportError:
@@ -116,7 +66,6 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
     
     conn = None
     try:
-        # Build connection parameters
         connect_params = {
             'account': config.account,
             'user': config.user,
@@ -127,15 +76,11 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
             'client_session_keep_alive': True,
         }
         
-        # Use key-pair auth if private key is provided (base64 or file path)
         if config.private_key_base64:
-            logger.info("Using key-pair authentication for Snowflake (base64-encoded key)")
             connect_params['private_key'] = _load_private_key(key_base64=config.private_key_base64)
         elif config.private_key_path:
-            logger.info("Using key-pair authentication for Snowflake (file path)")
             connect_params['private_key'] = _load_private_key(key_path=config.private_key_path)
         elif config.password:
-            logger.info("Using password authentication for Snowflake")
             connect_params['password'] = config.password
         else:
             raise SnowflakeConnectionError(
@@ -156,8 +101,6 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
         yield conn
         
     except HTTPException:
-        # Re-raise HTTP exceptions (like 429 rate limits) without wrapping
-        # These are application-level responses, not database errors
         raise
     
     except snowflake.connector.errors.DatabaseError as e:
@@ -191,15 +134,7 @@ def get_snowflake_connection(config: SnowflakeConfig) -> Generator[SnowflakeConn
 # ---------------------------------------------------------------------------
 
 class SnowflakeConnectionPool:
-    """
-    Simple connection pool for Snowflake.
-    
-    In production, you'd want a proper connection pool to avoid
-    the overhead of creating new connections for each request.
-    
-    This is a simplified implementation. For heavy production use,
-    consider using a library like SQLAlchemy with Snowflake dialect.
-    """
+    """# TODO: fix later - naive pool, creates new connection each time."""
     
     def __init__(self, config: SnowflakeConfig, pool_size: int = 5):
         self._config = config
@@ -213,12 +148,6 @@ class SnowflakeConnectionPool:
     
     @contextmanager
     def get_connection(self) -> Generator[SnowflakeConnection, None, None]:
-        """
-        Get a connection from the pool.
-        
-        For now, this just creates a new connection each time.
-        A real implementation would reuse connections.
-        """
         with get_snowflake_connection(self._config) as conn:
             yield conn
 
@@ -228,15 +157,7 @@ class SnowflakeConnectionPool:
 # ---------------------------------------------------------------------------
 
 class MockSnowflakeCursor:
-    """
-    Mock Snowflake cursor for testing.
-    
-    Implements just enough of the cursor interface to support
-    SessionRepository operations without a real database.
-    
-    This is a simple in-memory implementation that handles the
-    basic MERGE and SELECT queries used by SessionRepository.
-    """
+    """In-memory cursor — handles MERGE/SELECT/INSERT/UPDATE/DELETE by pattern matching."""
     
     def __init__(self, storage: dict) -> None:
         self._storage = storage
@@ -244,12 +165,6 @@ class MockSnowflakeCursor:
         self._rowcount: int = 0
     
     def execute(self, query: str, params: Optional[tuple] = None) -> 'MockSnowflakeCursor':
-        """
-        Execute a query against mock storage.
-        
-        Handles basic MERGE (upsert) and SELECT queries by pattern matching.
-        This is simplified but sufficient for testing the API flow.
-        """
         logger.debug(
             "Mock cursor execute",
             extra={"query": query[:100], "params": params}
@@ -257,34 +172,27 @@ class MockSnowflakeCursor:
         
         query_upper = query.upper().strip()
         
-        # Handle MERGE INTO (upsert) operations
         if 'MERGE INTO' in query_upper:
             self._handle_merge(query_upper, params)
         
-        # Handle SELECT queries
         elif query_upper.startswith('SELECT'):
             self._handle_select(query_upper, params)
         
-        # Handle INSERT queries
         elif 'INSERT INTO' in query_upper:
             self._handle_insert(query_upper, params)
         
-        # Handle UPDATE queries
         elif query_upper.startswith('UPDATE'):
             self._handle_update(query_upper, params)
         
-        # Handle DELETE queries
         elif query_upper.startswith('DELETE'):
             self._handle_delete(query_upper, params)
         
         return self
     
     def _handle_merge(self, query: str, params: Optional[tuple]) -> None:
-        """Handle MERGE INTO (upsert) queries."""
         if not params:
             return
-        
-        # Extract table name
+
         if 'COACHING_SESSIONS' in query:
             table = 'coaching_sessions'
             session_id = str(params[0])  # First param is session_id
@@ -322,89 +230,57 @@ class MockSnowflakeCursor:
             self._rowcount = 1
     
     def _handle_select(self, query: str, params: Optional[tuple]) -> None:
-        """Handle SELECT queries."""
         if not params:
             self._results = []
             return
         
-        # Get session by ID (main query used by SessionRepository.get_session)
         if 'FROM COACHING_SESSIONS' in query and 'WHERE' in query:
             session_id = str(params[0])
             session = self._storage['coaching_sessions'].get(session_id)
             
             if session:
-                # Build a row with all the fields the repository expects
-                # This matches the structure in SessionRepository.get_session
                 params_tuple = session.get('params', ())
                 
-                # Return row matching the SELECT structure
                 self._results = [(
-                    session_id,  # session_id
-                    None,  # created_at
-                    None,  # updated_at
-                    'active',  # status
-                    params_tuple[1] if len(params_tuple) > 1 else None,  # video_id
-                    None,  # filename
-                    None,  # storage_path
-                    None,  # duration_seconds
-                    None,  # resolution_width
-                    None,  # resolution_height
-                    None,  # fps
-                    None,  # file_size_bytes
-                    None,  # uploaded_at
-                    None,  # video_stroke_type
-                    params_tuple[2] if len(params_tuple) > 2 else None,  # analysis_id
-                    None,  # analysis_stroke_type
-                    None,  # summary
-                    None,  # observations
-                    None,  # feedback
-                    None,  # frame_count_analyzed
-                    None,  # analyzed_at
+                    session_id, None, None, 'active',
+                    params_tuple[1] if len(params_tuple) > 1 else None,
+                    None, None, None, None, None, None, None, None, None,
+                    params_tuple[2] if len(params_tuple) > 2 else None,
+                    None, None, None, None, None, None,
                 )]
             else:
                 self._results = []
         
-        # Get messages for session
         elif 'FROM MESSAGES' in query:
             session_id = str(params[0]) if params else None
             self._results = []  # No messages by default
         
-        # Get usage limits
         elif 'FROM USAGE_LIMITS' in query:
             if len(params) >= 3:
-                # Query by identifier, type, and resource
                 identifier = str(params[0])
                 identifier_type = str(params[1])
                 resource_type = str(params[2])
                 
-                # Find matching records
                 for record in self._storage['usage_limits'].values():
                     record_params = record['params']
-                    # Params: (limit_id, identifier, identifier_type, resource_type,
-                    #          usage_count, limit_max, period_start, period_end)
                     if (str(record_params[1]) == identifier and
                         str(record_params[2]) == identifier_type and
                         str(record_params[3]) == resource_type):
-                        # Check if period matches (params[3] and params[4] are period_start and period_end if provided)
                         if len(params) == 5:
                             if (record_params[6] == params[3] and
                                 record_params[7] == params[4]):
-                                # Return: (limit_id, usage_count, limit_max)
                                 self._results = [(
-                                    record_params[0],  # limit_id
-                                    record_params[4],  # usage_count
-                                    record_params[5],  # limit_max
+                                    record_params[0],
+                                    record_params[4],
+                                    record_params[5],
                                 )]
                                 return
                         else:
-                            # For get_current_usage query: check if period_end > now
                             if len(params) == 4:
-                                # params[3] is 'now' for comparison
-                                # For simplicity in mock, just return the first match
                                 self._results = [(
-                                    record_params[4],  # usage_count
-                                    record_params[5],  # limit_max
-                                    record_params[7],  # period_end
+                                    record_params[4],
+                                    record_params[5],
+                                    record_params[7],
                                 )]
                                 return
                 
@@ -413,7 +289,6 @@ class MockSnowflakeCursor:
                 self._results = []
     
     def _handle_insert(self, query: str, params: Optional[tuple]) -> None:
-        """Handle INSERT queries."""
         if not params:
             return
         
@@ -429,9 +304,6 @@ class MockSnowflakeCursor:
         elif 'USAGE_LIMITS' in query:
             table = 'usage_limits'
             limit_id = str(params[0])
-            # Store the full params tuple for usage_limits
-            # Format: (limit_id, identifier, identifier_type, resource_type, 
-            #          usage_count, limit_max, period_start, period_end)
             self._storage[table][limit_id] = {
                 'limit_id': limit_id,
                 'params': params,
@@ -439,30 +311,19 @@ class MockSnowflakeCursor:
             self._rowcount = 1
     
     def _handle_update(self, query: str, params: Optional[tuple]) -> None:
-        """Handle UPDATE queries."""
         if not params:
             return
-        
+
         if 'USAGE_LIMITS' in query:
-            # For UPDATE usage_limits, params are: (new_usage_count, limit_id)
             new_count = params[0]
             limit_id = str(params[1])
             
             if limit_id in self._storage['usage_limits']:
                 record = self._storage['usage_limits'][limit_id]
-                # Update the usage count in the stored params
                 old_params = record['params']
-                # Params format: (limit_id, identifier, identifier_type, resource_type,
-                #                 usage_count, limit_max, period_start, period_end)
                 new_params = (
-                    old_params[0],  # limit_id
-                    old_params[1],  # identifier
-                    old_params[2],  # identifier_type
-                    old_params[3],  # resource_type
-                    new_count,      # usage_count (updated)
-                    old_params[5],  # limit_max
-                    old_params[6],  # period_start
-                    old_params[7],  # period_end
+                    old_params[0], old_params[1], old_params[2], old_params[3],
+                    new_count, old_params[5], old_params[6], old_params[7],
                 )
                 record['params'] = new_params
                 self._rowcount = 1
@@ -470,13 +331,10 @@ class MockSnowflakeCursor:
                 self._rowcount = 0
     
     def _handle_delete(self, query: str, params: Optional[tuple]) -> None:
-        """Handle DELETE queries."""
         if not params:
             return
-        
+
         if 'USAGE_LIMITS' in query:
-            # For DELETE usage_limits by identifier
-            # Params: (identifier, identifier_type, resource_type)
             identifier = str(params[0])
             identifier_type = str(params[1])
             resource_type = str(params[2])
@@ -486,7 +344,6 @@ class MockSnowflakeCursor:
             
             for limit_id, record in self._storage['usage_limits'].items():
                 record_params = record['params']
-                # Check if this record matches
                 if (str(record_params[1]) == identifier and
                     str(record_params[2]) == identifier_type and
                     str(record_params[3]) == resource_type):
@@ -499,40 +356,25 @@ class MockSnowflakeCursor:
             self._rowcount = deleted_count
     
     def fetchone(self):
-        """Fetch one row from results."""
         if not self._results:
             return None
         return self._results[0]
     
     def fetchall(self) -> list:
-        """Fetch all rows from results."""
         return self._results
     
     def close(self) -> None:
-        """Close cursor (no-op for mock)."""
         pass
-    
+
     @property
     def rowcount(self) -> int:
-        """Return number of rows affected."""
         return self._rowcount
 
 
 class MockSnowflakeConnection:
-    """
-    Mock Snowflake connection for local development.
-    
-    Stores data in memory using a simple dictionary structure.
-    This enables testing the full API without a real database.
-    
-    Not suitable for production, but perfect for:
-    - Local development
-    - Unit tests
-    - CI/CD environments
-    """
-    
+    """In-memory Snowflake mock for local dev and testing."""
+
     def __init__(self) -> None:
-        # In-memory storage: {table_name: {id: row_dict}}
         self._storage: dict[str, dict[str, dict]] = {
             'coaching_sessions': {},
             'videos': {},
@@ -545,45 +387,31 @@ class MockSnowflakeConnection:
         logger.info("Initialized mock Snowflake connection (in-memory)")
     
     def cursor(self) -> MockSnowflakeCursor:
-        """Create a mock cursor."""
         return MockSnowflakeCursor(self._storage)
     
     def commit(self) -> None:
-        """Commit transaction (no-op for mock, always auto-commits)."""
         self._committed = True
         logger.debug("Mock connection commit")
     
     def rollback(self) -> None:
-        """Rollback transaction (no-op for mock)."""
         logger.debug("Mock connection rollback")
     
     def close(self) -> None:
-        """Close connection (no-op for mock)."""
         logger.debug("Mock connection close")
-    
-    # Helper methods for testing
+
     def _add_session(self, session_id: UUID, session_data: dict) -> None:
-        """Add session to mock storage (for test setup)."""
         self._storage['coaching_sessions'][str(session_id)] = session_data
     
     def _get_session(self, session_id: UUID) -> Optional[dict]:
-        """Get session from mock storage (for test assertions)."""
         return self._storage['coaching_sessions'].get(str(session_id))
     
     def _clear(self) -> None:
-        """Clear all mock storage (for test cleanup)."""
         for table in self._storage.values():
             table.clear()
 
 
 @contextmanager
 def get_mock_snowflake_connection() -> Generator[MockSnowflakeConnection, None, None]:
-    """
-    Provide mock Snowflake connection for local development.
-    
-    Returns a connection that stores data in memory. Perfect for
-    testing and local development without provisioning Snowflake.
-    """
     conn = MockSnowflakeConnection()
     try:
         yield conn
@@ -600,19 +428,7 @@ def create_snowflake_connection(
     config: Optional[SnowflakeConfig] = None,
     mock_mode: bool = False,
 ) -> Generator[SnowflakeConnection, None, None]:
-    """
-    Create Snowflake connection based on configuration.
-    
-    Factory function that returns either a real or mock connection
-    depending on mock_mode flag.
-    
-    Args:
-        config: Snowflake configuration (required if not mock_mode)
-        mock_mode: If True, return mock connection for testing
-    
-    Yields:
-        SnowflakeConnection implementation (real or mock)
-    """
+    """Factory: returns real or mock Snowflake connection."""
     if mock_mode:
         with get_mock_snowflake_connection() as conn:
             yield conn

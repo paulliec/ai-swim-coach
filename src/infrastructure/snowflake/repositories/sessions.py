@@ -1,14 +1,7 @@
 """
 Snowflake repository for coaching sessions.
 
-This module implements the repository pattern for session data access.
-The repository:
-1. Translates between domain models and database representations
-2. Encapsulates all SQL queries
-3. Provides a clean interface for the application layer
-
-The application code never writes SQL directly — it asks the repository
-for what it needs in domain terms.
+Translates between domain models and database rows.
 """
 
 import json
@@ -35,12 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class SnowflakeConnection(Protocol):
-    """
-    Protocol for Snowflake connections.
-    
-    Using a protocol means tests can provide a mock without
-    importing the actual snowflake-connector-python.
-    """
+    """Protocol so tests can mock without importing snowflake-connector."""
     
     def cursor(self): ...
     def commit(self) -> None: ...
@@ -48,15 +36,7 @@ class SnowflakeConnection(Protocol):
 
 @dataclass
 class SnowflakeConfig:
-    """
-    Configuration for Snowflake connection.
-    
-    Supports both password and key-pair authentication:
-    - Password auth: Set password
-    - Key-pair auth: Set either private_key_path (file) or private_key_base64 (env var)
-    
-    For deployment (Fly.io, etc.), prefer private_key_base64 over private_key_path.
-    """
+    """Snowflake connection config. Supports password and key-pair auth."""
     account: str
     user: str
     password: Optional[str] = None
@@ -74,43 +54,24 @@ class SessionNotFoundError(Exception):
 
 
 class SessionRepository:
-    """
-    Repository for coaching session persistence.
-    
-    Each method corresponds to a use case the application needs:
-    - save_session: Persist a new or updated session
-    - get_session: Load a session by ID
-    - list_recent: Get recent sessions for display
-    
-    The repository handles the translation between our rich domain
-    objects and the flat database representation.
-    """
+    """Coaching session persistence — save, load, list."""
     
     def __init__(self, connection: SnowflakeConnection) -> None:
         self._conn = connection
     
     def save_session(self, session: CoachingSession) -> None:
-        """
-        Persist a coaching session and all its related data.
-        
-        This method is idempotent — calling it multiple times with
-        the same session will update rather than duplicate.
-        """
+        """Persist session and related data. Idempotent (upserts)."""
         cursor = self._conn.cursor()
-        
+
         try:
-            # Save video if present
             if session.video:
                 self._upsert_video(cursor, session.video)
-            
-            # Save session record
+
             self._upsert_session(cursor, session)
-            
-            # Save analysis if present
+
             if session.analysis:
                 self._upsert_analysis(cursor, session.analysis, session.id)
-            
-            # Save new messages (we don't update messages, only append)
+
             self._save_new_messages(cursor, session)
             
             self._conn.commit()
@@ -125,16 +86,10 @@ class SessionRepository:
             cursor.close()
     
     def get_session(self, session_id: UUID) -> CoachingSession:
-        """
-        Load a complete coaching session by ID.
-        
-        Returns the session with video metadata, analysis results,
-        and full conversation history.
-        """
+        """Load complete session by ID (video + analysis + messages)."""
         cursor = self._conn.cursor()
-        
+
         try:
-            # Get session with video and analysis
             cursor.execute("""
                 SELECT 
                     s.session_id,
@@ -167,8 +122,7 @@ class SessionRepository:
             row = cursor.fetchone()
             if not row:
                 raise SessionNotFoundError(f"Session {session_id} not found")
-            
-            # Get conversation messages
+
             cursor.execute("""
                 SELECT message_id, role, content, created_at
                 FROM messages
@@ -188,12 +142,7 @@ class SessionRepository:
         limit: int = 20,
         include_completed: bool = True,
     ) -> list[CoachingSession]:
-        """
-        List recent coaching sessions.
-        
-        Returns sessions with basic info (no full conversation history).
-        Useful for dashboard/list views.
-        """
+        """List recent sessions (no full conversation history)."""
         cursor = self._conn.cursor()
         
         try:
@@ -231,7 +180,6 @@ class SessionRepository:
     # -----------------------------------------------------------------------
     
     def _upsert_video(self, cursor, video: VideoMetadata) -> None:
-        """Insert or update video metadata."""
         cursor.execute("""
             MERGE INTO videos AS target
             USING (SELECT %s AS video_id) AS source
@@ -259,7 +207,6 @@ class SessionRepository:
         ))
     
     def _upsert_session(self, cursor, session: CoachingSession) -> None:
-        """Insert or update session record."""
         cursor.execute("""
             MERGE INTO coaching_sessions AS target
             USING (SELECT %s AS session_id) AS source
@@ -289,8 +236,6 @@ class SessionRepository:
         analysis: AnalysisResult,
         session_id: UUID,
     ) -> None:
-        """Insert or update analysis results."""
-        # Convert observations and feedback to JSON
         observations_json = json.dumps([
             {
                 "category": obs.category.value,
@@ -341,18 +286,15 @@ class SessionRepository:
         ))
     
     def _save_new_messages(self, cursor, session: CoachingSession) -> None:
-        """Save any new messages that aren't already persisted."""
         if not session.conversation:
             return
-        
-        # Get existing message IDs
+
         cursor.execute("""
             SELECT message_id FROM messages WHERE session_id = %s
         """, (str(session.id),))
         
         existing_ids = {row[0] for row in cursor.fetchall()}
-        
-        # Insert new messages
+
         new_messages = [
             msg for msg in session.conversation
             if str(msg.id) not in existing_ids
@@ -374,8 +316,6 @@ class SessionRepository:
         session_row,
         message_rows: list,
     ) -> CoachingSession:
-        """Construct a CoachingSession from database rows."""
-        # Build video if present
         video = None
         if session_row[4]:  # video_id
             video = VideoMetadata(
@@ -389,7 +329,6 @@ class SessionRepository:
                 uploaded_at=session_row[12],
             )
         
-        # Build analysis if present
         analysis = None
         if session_row[14]:  # analysis_id
             analysis = AnalysisResult(
@@ -403,7 +342,6 @@ class SessionRepository:
                 analyzed_at=session_row[20],
             )
         
-        # Build messages
         messages = [
             ChatMessage(
                 id=UUID(row[0]),
@@ -424,7 +362,6 @@ class SessionRepository:
         )
     
     def _build_session_summary(self, row) -> CoachingSession:
-        """Build a lightweight session from summary query."""
         video = None
         if row[4]:
             video = VideoMetadata(
@@ -449,26 +386,10 @@ class SessionRepository:
         )
     
     def _parse_variant_json(self, variant_data):
-        """
-        Parse Snowflake VARIANT data that might be a string or already parsed.
-        
-        Snowflake's VARIANT type behavior varies by driver and context:
-        - snowflake-connector-python: Returns VARIANT as JSON string
-        - snowflake-sqlalchemy: May return parsed dict/list
-        - Mock implementation: Returns None or parsed data
-        
-        This helper ensures we handle all cases consistently.
-        
-        Args:
-            variant_data: VARIANT column value (string, dict, list, or None)
-        
-        Returns:
-            Parsed Python object (dict or list), or None if empty
-        """
+        """Parse Snowflake VARIANT — might be JSON string, dict, or None."""
         if not variant_data:
             return None
-        
-        # If it's a string, parse it
+
         if isinstance(variant_data, str):
             try:
                 return json.loads(variant_data)
@@ -479,18 +400,14 @@ class SessionRepository:
                 )
                 return None
         
-        # Already parsed (dict or list)
         return variant_data
     
     def _parse_observations(self, obs_json) -> list[TechniqueObservation]:
-        """Parse observations from Snowflake VARIANT column."""
-        # Parse VARIANT data (handles both string and dict/list)
         obs_data = self._parse_variant_json(obs_json)
         
         if not obs_data:
             return []
         
-        # Validate it's a list
         if not isinstance(obs_data, list):
             logger.warning(
                 "Observations data is not a list after parsing",
@@ -500,7 +417,6 @@ class SessionRepository:
         
         observations = []
         for obs in obs_data:
-            # Defensive: handle nested string (shouldn't happen but be safe)
             if isinstance(obs, str):
                 obs = self._parse_variant_json(obs)
                 if not obs:
@@ -513,14 +429,11 @@ class SessionRepository:
         return observations
     
     def _parse_feedback(self, fb_json) -> list[CoachingFeedback]:
-        """Parse feedback from Snowflake VARIANT column."""
-        # Parse VARIANT data (handles both string and dict/list)
         fb_data = self._parse_variant_json(fb_json)
         
         if not fb_data:
             return []
         
-        # Validate it's a list
         if not isinstance(fb_data, list):
             logger.warning(
                 "Feedback data is not a list after parsing",
@@ -530,7 +443,6 @@ class SessionRepository:
         
         feedback = []
         for fb in fb_data:
-            # Defensive: handle nested string (shouldn't happen but be safe)
             if isinstance(fb, str):
                 fb = self._parse_variant_json(fb)
                 if not fb:

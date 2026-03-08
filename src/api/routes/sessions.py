@@ -1,14 +1,8 @@
 """
 Coaching session API endpoints.
 
-Manages ongoing coaching conversations after initial video analysis.
-Users can ask follow-up questions and get targeted advice based on
-their specific video and technique.
-
-The conversation history is maintained in the database, enabling:
-- Multi-turn coaching dialogues
-- Session resumption across disconnects  
-- Historical reference for the swimmer
+Manages follow-up conversations after video analysis.
+History is persisted in Snowflake for multi-turn coaching.
 """
 
 import logging
@@ -95,12 +89,7 @@ async def list_sessions(
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> list[SessionDetailResponse]:
-    """
-    List recent coaching sessions.
-
-    Returns sessions ordered by most recently updated.
-    Used by the Sessions tab in the frontend.
-    """
+    """List recent sessions, ordered by most recently updated."""
     logger.info(
         "Listing sessions",
         extra={"user_id": x_user_id or "anonymous"}
@@ -160,22 +149,7 @@ async def chat_with_coach(
     coach: SwimCoachDep = None,
     repository: SessionRepositoryDep = None,
 ) -> ChatResponse:
-    """
-    Continue a coaching conversation.
-    
-    This endpoint enables multi-turn dialogue with the AI coach.
-    The coach has context from:
-    - The initial video analysis
-    - Previous messages in the conversation
-    
-    This allows for targeted follow-up questions like:
-    - "Can you explain the catch drill in more detail?"
-    - "How do I know if my elbow is high enough?"
-    - "What should I focus on first?"
-    
-    The conversation is persisted to the database so sessions
-    can be resumed later.
-    """
+    """Continue coaching conversation with context from analysis and prior messages."""
     logger.info(
         "Processing chat message",
         extra={
@@ -184,7 +158,6 @@ async def chat_with_coach(
         }
     )
     
-    # Load session
     try:
         session = repository.get_session(session_id)
     except Exception as e:
@@ -196,8 +169,7 @@ async def chat_with_coach(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found"
         )
-    
-    # Verify session has been analyzed
+
     if not session.is_analyzed:
         logger.warning(
             "Chat attempted on unanalyzed session",
@@ -208,18 +180,15 @@ async def chat_with_coach(
             detail="Session must be analyzed before starting conversation. Call POST /analysis/{session_id}/analyze first."
         )
     
-    # Get coach response
     try:
         assistant_message = await coach.continue_conversation(
             session=session,
             user_message=request.message,
         )
         
-        # Add both messages to session
         session.add_message("user", request.message)
         session.add_message("assistant", assistant_message)
         
-        # Save updated session
         repository.save_session(session)
         
         logger.info(
@@ -262,26 +231,12 @@ async def get_session(
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> SessionDetailResponse:
-    """
-    Retrieve complete session details.
-    
-    Returns everything about a coaching session:
-    - Video metadata
-    - Analysis results
-    - Full conversation history
-    
-    Useful for:
-    - Displaying session history in UI
-    - Resuming conversations
-    - Reviewing past coaching sessions
-    - Debugging and support
-    """
+    """Retrieve complete session with video metadata, analysis, and conversation."""
     logger.info(
         "Retrieving session",
         extra={"session_id": str(session_id)}
     )
     
-    # Load session
     try:
         session = repository.get_session(session_id)
     except Exception as e:
@@ -293,8 +248,7 @@ async def get_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found"
         )
-    
-    # Convert to response format
+
     messages = [
         MessageItem(
             role=msg.role,
@@ -330,20 +284,7 @@ async def claim_session(
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> dict:
-    """
-    Claim an anonymous session.
-    
-    When a user tries the app without signing in, their session
-    is anonymous. After they sign in, they can claim it to save
-    the analysis to their account.
-    
-    This endpoint:
-    1. Loads the session
-    2. Updates it with the user_id
-    3. Saves it back to the database
-    
-    Returns the updated session details.
-    """
+    """Associate an anonymous session with an authenticated user."""
     if not x_user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -356,14 +297,8 @@ async def claim_session(
     )
     
     try:
-        # Load session
         session = repository.get_session(session_id)
-        
-        # TODO: In production, verify session is anonymous (no user_id)
-        # and not owned by another user
-        
-        # Update with user_id (when we add it to the model)
-        # For now, just return success
+        # TODO: fix later - verify session is anonymous and not owned by another user
         repository.save_session(session)
         
         logger.info(
@@ -400,31 +335,13 @@ async def delete_session(
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
 ) -> None:
-    """
-    Delete a coaching session.
-    
-    This endpoint would:
-    1. Delete frames from object storage
-    2. Delete messages from database
-    3. Delete analysis from database
-    4. Delete session record
-    
-    For now, this is a placeholder. In production, you'd want:
-    - Soft delete (mark as deleted, cleanup later)
-    - Cascading delete rules in database
-    - Audit logging
-    - User confirmation
-    """
+    """Delete a coaching session and all associated data."""
     logger.info(
         "Delete session requested",
         extra={"session_id": str(session_id)}
     )
     
-    # TODO: Implement session deletion
-    # - Delete from storage
-    # - Delete from database
-    # - Handle errors gracefully
-    
+    # TODO: fix later - needs cascade delete (storage + DB) and soft-delete support
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Session deletion not yet implemented"

@@ -86,6 +86,44 @@ The Anthropic API key is always required (no mock for LLM).
 - `/api/v1/sessions` — Coaching session management and chat
 - `/api/v1/video` — Video analysis endpoints
 
+## Code Style & Voice
+
+Senior engineer, pragmatic. Code should read like someone who's been
+around and made choices deliberately.
+
+### Comments
+- Terse. Explain why and enough what to jog future-me's memory
+- Skip obvious ones. Add when the reason isn't clear from context
+- Good: `# R2 over S3 - cheaper egress for video at this scale`
+- Good: `# two passes: cheap wide scan first, targeted detail second`
+- Bad: `# initialize the session variable`
+
+### TODOs
+- `# TODO: fix later - [brief reason it's deferred]`
+- Example: `# TODO: fix later - retry logic is naive, fine for low volume`
+
+### Naming
+- Use domain terms: stroke_type, split_time, frames, passes, session
+- Terse over descriptive when context is clear
+- `get_frames` not `retrieve_video_frames_from_storage`
+
+### Abstraction
+- DRY yes, but not at the cost of readability
+- Abstract real repetition, not hypothetical reuse
+- If the abstraction makes you ask "wtf is this again" — it's too much
+- No BaseProcessorAbstractFactoryInterface type nonsense
+- Concrete and clear beats architecturally "correct"
+
+### Dead Code
+- Delete it. That's what git is for.
+
+### General
+- Simple and correct beats clever
+- If it works and isn't a liability, leave it alone
+- No over-engineering for hypothetical scale
+- Commit messages like a person: "fix retry logic" not
+  "Implement robust exponential backoff for API rate limiting"
+
 ## Key Files
 
 - `src/main.py` — App factory (`create_app()`), CORS, router registration

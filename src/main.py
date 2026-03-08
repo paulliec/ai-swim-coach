@@ -1,17 +1,9 @@
 """
 FastAPI application entry point.
 
-This module creates and configures the FastAPI application.
-Using an application factory pattern (create_app function) because:
-- Easier to test with different configurations
-- Explicit about initialization order
-- Can create multiple app instances if needed (e.g., for testing)
-
-For local development:
-    uvicorn src.main:app --reload
-
-For production:
-    gunicorn src.main:app -w 4 -k uvicorn.workers.UvicornWorker
+App factory pattern — see create_app().
+Dev: uvicorn src.main:app --reload
+Prod: gunicorn src.main:app -w 4 -k uvicorn.workers.UvicornWorker
 """
 
 import logging
@@ -35,16 +27,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan manager.
-    
-    This context manager runs on startup and shutdown, enabling:
-    - Resource initialization (connection pools, caches)
-    - Cleanup on shutdown (close connections, flush logs)
-    
-    FastAPI calls this automatically when the application starts/stops.
-    """
-    # Startup
+    """Startup/shutdown lifecycle."""
     settings = get_settings()
     
     logger.info(
@@ -58,33 +41,22 @@ async def lifespan(app: FastAPI):
         }
     )
     
-    # Validate configuration
     missing_fields = settings.validate_required_fields()
     if missing_fields:
         logger.error(
             "Missing required configuration",
             extra={"missing_fields": missing_fields}
         )
-        # In production, you might want to fail fast here
-        # For development, we log the error but continue
+        # TODO: fix later - should fail fast in prod, log-and-continue in dev
     
     yield
-    
-    # Shutdown
     logger.info("SwimCoach API shutting down")
 
 
 def create_app() -> FastAPI:
-    """
-    Application factory.
-    
-    Creates and configures the FastAPI application.
-    This function is called once at startup (in production) or
-    multiple times (in tests with different configurations).
-    """
+    """Application factory."""
     settings = get_settings()
     
-    # Create FastAPI instance
     app = FastAPI(
         title=settings.api_title,
         version=settings.api_version,
@@ -124,11 +96,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     
-    # CORS middleware
-    # Configure allowed origins via CORS_ORIGINS environment variable
-    # Default: localhost (dev) + Cloudflare Pages (production)
-    # Production: Set to your actual frontend domain(s)
-    # Example: https://swimcoach.app,https://ai-swim-coach.pages.dev
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
@@ -137,7 +104,6 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Include routers
     app.include_router(
         health.router,
         prefix="/health",
@@ -162,7 +128,6 @@ def create_app() -> FastAPI:
         tags=["Video Analysis"],
     )
     
-    # Root endpoint
     @app.get("/", include_in_schema=False)
     async def root():
         """Root endpoint - redirect to docs."""
@@ -173,15 +138,9 @@ def create_app() -> FastAPI:
             "health": "/health",
         }
     
-    # Global exception handler
     @app.exception_handler(Exception)
     async def global_exception_handler(request, exc):
-        """
-        Catch-all exception handler.
-        
-        In production, this prevents stack traces from leaking to clients.
-        We log the full error server-side but return a generic message.
-        """
+        """Catch-all — log full error, return generic message to client."""
         logger.error(
             "Unhandled exception",
             extra={
@@ -210,16 +169,11 @@ def create_app() -> FastAPI:
     return app
 
 
-# Create the application instance
-# This is what uvicorn/gunicorn will import
 app = create_app()
 
 
-# For debugging/development
 if __name__ == "__main__":
     import uvicorn
-    
-    # Get settings to determine log level
     settings = get_settings()
     
     uvicorn.run(

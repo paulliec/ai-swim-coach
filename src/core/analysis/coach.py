@@ -1,13 +1,8 @@
 """
 Swim coaching logic and prompt management.
 
-This module contains the "coaching brain" — the logic that transforms
-video analysis into useful feedback. It's framework-agnostic and 
-doesn't know about HTTP or databases.
-
-The prompts are here, not in config, because they're core business logic.
-Changing them changes what the product does. They should be version
-controlled and reviewed like code.
+Prompts live here (not config) because they're core business logic.
+Framework-agnostic — no HTTP or database dependencies.
 """
 
 from dataclasses import dataclass
@@ -30,13 +25,7 @@ from .models import (
 # ---------------------------------------------------------------------------
 
 class VisionModelClient(Protocol):
-    """
-    Interface for vision-capable LLM clients.
-    
-    Using a Protocol here means the coach doesn't know or care whether
-    we're using Claude, GPT-4V, or a mock for testing. It just needs
-    something that can look at images and respond.
-    """
+    """Interface for vision-capable LLM clients."""
     
     async def analyze_images(
         self,
@@ -138,13 +127,7 @@ class FrameSet:
 
 
 class SwimCoach:
-    """
-    The coaching service that orchestrates analysis and conversation.
-    
-    This is a service, not a data container. It has behavior, not state
-    (beyond its dependencies). Each method call is stateless from the
-    coach's perspective — session state lives in CoachingSession.
-    """
+    """Stateless coaching service — session state lives in CoachingSession."""
     
     def __init__(self, vision_client: VisionModelClient) -> None:
         self._vision_client = vision_client
@@ -156,25 +139,13 @@ class SwimCoach:
         user_notes: str = "",
         knowledge_context: list[str] | None = None,
     ) -> AnalysisResult:
-        """
-        Perform initial analysis of video frames.
-        
-        This is the main entry point for new videos. It sends frames
-        to the vision model and parses the response into structured feedback.
-        
-        Args:
-            frames: Video frames to analyze
-            stroke_type: The stroke being analyzed
-            user_notes: Optional notes from the swimmer
-            knowledge_context: Optional RAG knowledge chunks to augment analysis
-        """
+        """Analyze video frames and return structured coaching feedback."""
         user_prompt = ANALYSIS_USER_PROMPT_TEMPLATE.format(
             frame_count=len(frames.frames),
             stroke_type=stroke_type.value,
             user_notes=user_notes or "None provided",
         )
         
-        # Build system prompt with optional RAG context
         system_prompt = SYSTEM_PROMPT
         if knowledge_context:
             rag_content = "\n\n".join(
@@ -191,9 +162,6 @@ class SwimCoach:
             user_prompt=user_prompt,
         )
         
-        # Parse the response into structured feedback
-        # In production, this would be more robust — possibly asking
-        # the model to respond in JSON, or using a separate parsing step
         result = self._parse_analysis_response(raw_response, stroke_type)
         result.frame_count_analyzed = len(frames.frames)
         
@@ -204,19 +172,11 @@ class SwimCoach:
         session: CoachingSession,
         user_message: str,
     ) -> str:
-        """
-        Handle follow-up questions in a coaching session.
-        
-        The session contains the conversation history and initial analysis,
-        which we use to provide context to the model.
-        """
+        """Handle follow-up questions using session history as context."""
         if not session.is_analyzed:
             raise ValueError("Cannot continue conversation without initial analysis")
         
-        # Build the message history for the model
         messages = self._build_message_history(session, user_message)
-        
-        # Add context about the initial analysis
         context_prompt = FOLLOWUP_CONTEXT_TEMPLATE.format(
             initial_analysis=session.analysis.summary if session.analysis else ""
         )
@@ -233,17 +193,8 @@ class SwimCoach:
         raw_response: str,
         stroke_type: StrokeType,
     ) -> AnalysisResult:
-        """
-        Parse the model's text response into structured data.
-        
-        This is a simplified implementation. A production version would:
-        - Request JSON output from the model
-        - Use a more robust parsing strategy
-        - Handle edge cases and malformed responses
-        """
-        # For now, we store the raw response as the summary
-        # and create a single feedback item
-        # TODO: Implement proper parsing with structured output
+        """Parse model text into structured feedback."""
+        # TODO: fix later - raw text parsing, structured JSON output would be better
         
         result = AnalysisResult(
             stroke_type=stroke_type,
@@ -252,7 +203,7 @@ class SwimCoach:
             feedback=[],
         )
         
-        # Extract primary focus if the model followed our format
+        # extract primary focus if model followed our format
         if "PRIMARY FOCUS:" in raw_response:
             primary_section = self._extract_section(raw_response, "PRIMARY FOCUS:")
             if primary_section:
@@ -270,7 +221,7 @@ class SwimCoach:
         return result
     
     def _extract_section(self, text: str, header: str) -> str:
-        """Extract content between a header and the next numbered section."""
+        """Extract content between a header and the next section."""
         lines = text.split("\n")
         capturing = False
         captured = []
@@ -278,14 +229,13 @@ class SwimCoach:
         for line in lines:
             if header in line:
                 capturing = True
-                # Get the rest of this line after the header
+                # rest of line after header
                 after_header = line.split(header, 1)[1].strip()
                 if after_header:
                     captured.append(after_header)
                 continue
             
             if capturing:
-                # Stop at the next section header (numbered or all caps)
                 if line.strip() and (
                     line.strip()[0].isdigit() or 
                     line.strip().isupper()
@@ -302,22 +252,19 @@ class SwimCoach:
     ) -> list[dict[str, str]]:
         """Convert session conversation to model message format."""
         messages = []
-        
-        # Add the initial analysis as the first assistant message
+
         if session.analysis:
             messages.append({
                 "role": "assistant",
                 "content": session.analysis.summary,
             })
         
-        # Add conversation history
         for msg in session.conversation:
             messages.append({
                 "role": msg.role,
                 "content": msg.content,
             })
         
-        # Add the new user message
         messages.append({
             "role": "user",
             "content": new_message,

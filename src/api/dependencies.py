@@ -1,14 +1,7 @@
 """
 FastAPI dependency injection.
 
-Dependencies provide instances of services, clients, and configuration
-to route handlers. Using dependency injection means:
-- Routes don't instantiate their own dependencies (easier to test)
-- Dependencies can be mocked for testing
-- Configuration is centralized
-- Resource lifecycle (connections, clients) is managed properly
-
-Each dependency is a function that FastAPI calls when needed.
+Each function provides a service instance to route handlers.
 """
 
 import logging
@@ -58,17 +51,7 @@ async def verify_api_key(
     settings: Annotated[Settings, Depends(get_settings)],
     api_key: str = Security(api_key_header),
 ) -> str:
-    """
-    Validate API key from request header.
-    
-    This is a simple API key authentication scheme. For production, you'd want:
-    - Key hashing (don't store plaintext keys)
-    - Rate limiting per key
-    - Key usage analytics
-    - Automatic key rotation
-    
-    Raises 403 if key is invalid or missing.
-    """
+    """Validate API key from X-API-Key header. Raises 403 if invalid."""
     if not api_key:
         logger.warning("Request missing API key")
         raise HTTPException(
@@ -96,14 +79,7 @@ async def verify_api_key(
 def get_swim_coach(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SwimCoach:
-    """
-    Provide SwimCoach instance with Anthropic client.
-    
-    The coach is stateless, so we create a new instance per request.
-    In production with high load, you might want to reuse the Anthropic
-    client across requests.
-    """
-    # Create Anthropic client
+    """Provide SwimCoach instance. Stateless, new per request."""
     config = AnthropicConfig(
         api_key=settings.anthropic_api_key,
         model=settings.anthropic_model,
@@ -112,47 +88,24 @@ def get_swim_coach(
     )
     
     anthropic_client = AnthropicVisionClient(config)
-    
-    # Create and return coach
-    coach = SwimCoach(vision_client=anthropic_client)
-    
-    logger.debug("Created SwimCoach instance")
-    
-    return coach
+    return SwimCoach(vision_client=anthropic_client)
 
 
 def get_session_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[SessionRepository, None, None]:
-    """
-    Provide SessionRepository with database connection.
-    
-    This is a generator function (yields instead of returns) because
-    we need to manage the connection lifecycle:
-    1. Create connection
-    2. Create repository
-    3. Yield repository (FastAPI injects it)
-    4. Close connection (cleanup after request)
-    
-    FastAPI automatically handles the generator lifecycle.
-    
-    In mock mode, we reuse the same connection across requests
-    so that data persists during the testing session.
-    """
+    """Provide SessionRepository. Mock mode shares connection for data persistence."""
     global _mock_snowflake_connection
     
     if settings.snowflake_mock_mode:
-        # Use shared mock connection (persists across requests)
         if _mock_snowflake_connection is None:
             from ..infrastructure.snowflake.client import MockSnowflakeConnection
             _mock_snowflake_connection = MockSnowflakeConnection()
             logger.info("Created shared mock Snowflake connection for session")
         
         repo = SessionRepository(_mock_snowflake_connection)
-        logger.debug("Using shared mock Snowflake connection")
         yield repo
     else:
-        # Use real Snowflake connection
         config = SnowflakeConfig(
             account=settings.snowflake_account,
             user=settings.snowflake_user,
@@ -166,39 +119,22 @@ def get_session_repository(
         )
         
         with create_snowflake_connection(config=config) as conn:
-            repo = SessionRepository(conn)
-            logger.debug("Created SessionRepository with Snowflake connection")
-            yield repo
+            yield SessionRepository(conn)
 
 
 def get_usage_limit_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[UsageLimitRepository, None, None]:
-    """
-    Provide UsageLimitRepository for rate limiting.
-    
-    Like SessionRepository, this uses the same Snowflake connection
-    strategy: shared mock for testing, real connection for production.
-    
-    Why separate from SessionRepository:
-    - Different concerns (rate limiting vs session data)
-    - Could be moved to Redis later for better performance
-    - Keeps repository responsibilities focused
-    """
+    """Provide UsageLimitRepository. Separate from sessions — could move to Redis later."""
     global _mock_snowflake_connection
     
     if settings.snowflake_mock_mode:
-        # Use shared mock connection (same as SessionRepository)
         if _mock_snowflake_connection is None:
             from ..infrastructure.snowflake.client import MockSnowflakeConnection
             _mock_snowflake_connection = MockSnowflakeConnection()
-            logger.info("Created shared mock Snowflake connection for usage limits")
-        
-        repo = UsageLimitRepository(_mock_snowflake_connection)
-        logger.debug("Using shared mock Snowflake connection for usage limits")
-        yield repo
+
+        yield UsageLimitRepository(_mock_snowflake_connection)
     else:
-        # Use real Snowflake connection
         config = SnowflakeConfig(
             account=settings.snowflake_account,
             user=settings.snowflake_user,
@@ -212,36 +148,22 @@ def get_usage_limit_repository(
         )
         
         with create_snowflake_connection(config=config) as conn:
-            repo = UsageLimitRepository(conn)
-            logger.debug("Created UsageLimitRepository with Snowflake connection")
-            yield repo
+            yield UsageLimitRepository(conn)
 
 
 def get_knowledge_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[KnowledgeRepository, None, None]:
-    """
-    Provide KnowledgeRepository for RAG queries.
-    
-    Used to retrieve relevant swimming technique knowledge
-    before generating AI coaching feedback.
-    
-    In mock mode, returns empty results (no knowledge base).
-    """
+    """Provide KnowledgeRepository for RAG. Mock mode returns empty results."""
     global _mock_snowflake_connection
     
     if settings.snowflake_mock_mode:
-        # Use shared mock connection
         if _mock_snowflake_connection is None:
             from ..infrastructure.snowflake.client import MockSnowflakeConnection
             _mock_snowflake_connection = MockSnowflakeConnection()
-            logger.info("Created shared mock Snowflake connection for knowledge")
-        
-        repo = KnowledgeRepository(_mock_snowflake_connection)
-        logger.debug("Using shared mock Snowflake connection for knowledge")
-        yield repo
+
+        yield KnowledgeRepository(_mock_snowflake_connection)
     else:
-        # Use real Snowflake connection
         config = SnowflakeConfig(
             account=settings.snowflake_account,
             user=settings.snowflake_user,
@@ -255,30 +177,18 @@ def get_knowledge_repository(
         )
         
         with create_snowflake_connection(config=config) as conn:
-            repo = KnowledgeRepository(conn)
-            logger.debug("Created KnowledgeRepository with Snowflake connection")
-            yield repo
+            yield KnowledgeRepository(conn)
 
 
 def get_storage_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> StorageClient:
-    """
-    Provide storage client for frame uploads/downloads.
-    
-    Returns either R2 client or mock client based on settings.
-    
-    In mock mode, we reuse the same client across requests
-    so that uploaded frames persist during the testing session.
-    """
+    """Provide R2 or mock storage client. Mock shares instance for persistence."""
     global _mock_storage_client
     
     if settings.r2_mock_mode:
-        # Use shared mock client (persists across requests)
         if _mock_storage_client is None:
             _mock_storage_client = create_storage_client(mock_mode=True)
-            logger.info("Created shared mock storage client for session")
-        logger.debug("Using shared mock storage client")
         return _mock_storage_client
     else:
         config = StorageConfig(
@@ -288,26 +198,16 @@ def get_storage_client(
             endpoint_url=settings.r2_endpoint,
         )
         client = create_storage_client(config=config)
-        logger.debug("Created R2 storage client")
-    
+
     return client
 
 
 def get_video_processor(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> VideoProcessor:
-    """
-    Provide video processor for server-side frame extraction.
-    
-    The video processor uses FFmpeg to extract frames from video.
-    In mock mode, returns placeholder frames without FFmpeg.
-    
-    We cache the processor since it validates FFmpeg availability
-    on creation (expensive check).
-    """
+    """Provide video processor. Cached — FFmpeg availability check is expensive."""
     global _video_processor
     
-    # determine mock mode from settings or environment
     mock_mode = settings.video_processor_mock_mode
     
     if _video_processor is None:
@@ -323,12 +223,7 @@ def get_video_processor(
 def get_vision_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AnthropicVisionClient:
-    """
-    Provide vision client for image analysis.
-    
-    This is the raw Anthropic client, used by the agentic coach.
-    Separate from SwimCoach for when we need direct vision access.
-    """
+    """Raw Anthropic client for agentic coach (direct vision access)."""
     config = AnthropicConfig(
         api_key=settings.anthropic_api_key,
         model=settings.anthropic_model,
@@ -343,7 +238,6 @@ def get_vision_client(
 # Convenience Type Aliases
 # ---------------------------------------------------------------------------
 
-# These type aliases make route signatures cleaner
 AuthenticatedUser = Annotated[str, Depends(verify_api_key)]
 SwimCoachDep = Annotated[SwimCoach, Depends(get_swim_coach)]
 SessionRepositoryDep = Annotated[SessionRepository, Depends(get_session_repository)]

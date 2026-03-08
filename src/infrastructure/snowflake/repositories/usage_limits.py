@@ -1,8 +1,5 @@
 """
 Usage limit repository for rate limiting.
-
-This module handles tracking and enforcing rate limits for API resources.
-Designed to prevent abuse while maintaining a good user experience.
 """
 
 import logging
@@ -16,27 +13,9 @@ IdentifierType = Literal["user_id", "ip_address"]
 
 
 class UsageLimitRepository:
-    """
-    Repository for managing usage limits and rate limiting.
-    
-    Enforces limits like "3 video analyses per day per user".
-    Uses Snowflake for storage, but could be swapped for Redis
-    in a high-traffic production environment.
-    
-    Why this approach:
-    - Simple to implement with existing Snowflake infrastructure
-    - Persists across server restarts
-    - Provides audit trail for usage patterns
-    - Can easily add different limit types (per hour, per week, etc.)
-    """
-    
+    """Rate limiting via Snowflake. Could swap for Redis at higher traffic."""
+
     def __init__(self, connection) -> None:
-        """
-        Initialize repository with a database connection.
-        
-        Args:
-            connection: Snowflake connection (or mock for testing)
-        """
         self._conn = connection
     
     def check_and_increment(
@@ -47,45 +26,14 @@ class UsageLimitRepository:
         limit_max: int,
         period_hours: int = 24
     ) -> tuple[bool, int, int]:
-        """
-        Check if user is within limits, and increment usage if so.
-        
-        This is the main method used by API endpoints to enforce limits.
-        It's atomic: either the check passes and count increments, or it fails.
-        
-        Args:
-            identifier: User ID (from Clerk) or IP address
-            identifier_type: Either 'user_id' or 'ip_address'
-            resource_type: What's being limited (e.g., 'video_analysis')
-            limit_max: Maximum uses allowed in the period
-            period_hours: Length of period in hours (default 24 = daily)
-        
-        Returns:
-            Tuple of (allowed: bool, current_count: int, limit_max: int)
-            - allowed: True if within limits and incremented
-            - current_count: Number of uses in current period
-            - limit_max: The maximum allowed
-        
-        Example:
-            allowed, count, max_limit = repo.check_and_increment(
-                identifier='user_123',
-                identifier_type='user_id',
-                resource_type='video_analysis',
-                limit_max=3
-            )
-            
-            if not allowed:
-                raise RateLimitError(f"Limit exceeded: {count}/{max_limit}")
-        """
+        """Check limit and increment if allowed. Returns (allowed, count, max)."""
         cursor = self._conn.cursor()
         
         try:
-            # Calculate current period boundaries
             now = datetime.now(timezone.utc)
             period_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             period_end = period_start + timedelta(hours=period_hours)
             
-            # Try to find existing limit record for current period
             cursor.execute("""
                 SELECT limit_id, usage_count, limit_max
                 FROM usage_limits
@@ -99,11 +47,9 @@ class UsageLimitRepository:
             result = cursor.fetchone()
             
             if result:
-                # Existing record found
                 limit_id, current_count, current_max = result
-                
+
                 if current_count >= limit_max:
-                    # Limit exceeded
                     logger.warning(
                         "Rate limit exceeded",
                         extra={
@@ -116,7 +62,6 @@ class UsageLimitRepository:
                     )
                     return False, current_count, limit_max
                 
-                # Increment count
                 new_count = current_count + 1
                 cursor.execute("""
                     UPDATE usage_limits
@@ -140,7 +85,6 @@ class UsageLimitRepository:
                 return True, new_count, limit_max
             
             else:
-                # No record for this period, create one
                 limit_id = str(uuid4())
                 cursor.execute("""
                     INSERT INTO usage_limits (
@@ -158,7 +102,7 @@ class UsageLimitRepository:
                     identifier,
                     identifier_type,
                     resource_type,
-                    1,  # First use
+                    1,
                     limit_max,
                     period_start,
                     period_end
@@ -182,8 +126,7 @@ class UsageLimitRepository:
                 "Failed to check/increment usage limit",
                 extra={"identifier": identifier, "error": str(e)}
             )
-            # On error, fail open (allow the request) rather than block legitimate users
-            # This is a business decision: prefer availability over strict limiting
+            # Fail open — prefer availability over strict limiting
             return True, 0, limit_max
         
         finally:
@@ -195,19 +138,7 @@ class UsageLimitRepository:
         identifier_type: IdentifierType,
         resource_type: str
     ) -> Optional[tuple[int, int, datetime]]:
-        """
-        Get current usage for an identifier without incrementing.
-        
-        Useful for showing users their current usage status.
-        
-        Args:
-            identifier: User ID or IP address
-            identifier_type: 'user_id' or 'ip_address'
-            resource_type: What to check (e.g., 'video_analysis')
-        
-        Returns:
-            Tuple of (current_count, limit_max, period_end) or None if no usage
-        """
+        """Get usage without incrementing. Returns (count, max, period_end) or None."""
         cursor = self._conn.cursor()
         
         try:
@@ -240,17 +171,7 @@ class UsageLimitRepository:
         identifier_type: IdentifierType,
         resource_type: str
     ) -> None:
-        """
-        Reset usage for an identifier (admin function).
-        
-        Could be used for customer support scenarios where we want
-        to give a user extra analyses.
-        
-        Args:
-            identifier: User ID or IP address
-            identifier_type: 'user_id' or 'ip_address'
-            resource_type: What to reset
-        """
+        """Admin: reset usage for an identifier."""
         cursor = self._conn.cursor()
         
         try:

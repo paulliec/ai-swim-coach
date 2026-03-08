@@ -1,14 +1,8 @@
 """
 Anthropic Claude API client wrapper.
 
-This module provides a thin wrapper around the Anthropic SDK that:
-1. Implements our VisionModelClient protocol
-2. Handles API-specific details (base64 encoding, message format)
-3. Provides consistent error handling
-4. Enables easy mocking for tests
-
-The wrapper is intentionally thin. We're not building a general-purpose
-client library — just enough to serve our use case cleanly.
+Thin wrapper implementing VisionModelClient protocol.
+Handles base64 encoding, message format, and rate limit retries.
 """
 
 import asyncio
@@ -42,14 +36,7 @@ class RateLimitExceeded(AnthropicClientError):
 
 @dataclass
 class AnthropicConfig:
-    """
-    Configuration for the Anthropic client.
-    
-    Using a dataclass instead of raw values means:
-    - Configuration is explicit and documented
-    - We can validate at construction time
-    - Easy to create test configurations
-    """
+    """Configuration for the Anthropic client."""
     api_key: str
     model: str = "claude-sonnet-4-20250514"  # Good balance of capability and cost
     max_tokens: int = 4096
@@ -65,13 +52,7 @@ class AnthropicConfig:
 
 
 class AnthropicVisionClient(VisionModelClient):
-    """
-    Implementation of VisionModelClient using Claude.
-    
-    This class knows about Anthropic's API format but doesn't know
-    about swimming or coaching. It just sends images and text,
-    gets responses back.
-    """
+    """VisionModelClient implementation using Claude. Knows API format, not swimming."""
     
     def __init__(self, config: AnthropicConfig) -> None:
         self._config = config
@@ -112,17 +93,10 @@ class AnthropicVisionClient(VisionModelClient):
         system_prompt: str,
         user_prompt: str,
     ) -> str:
-        """
-        Send images to Claude for analysis.
-
-        Images are base64 encoded and sent as part of the user message.
-        Claude's vision models can handle multiple images in a single request.
-        Automatically retries with exponential backoff on rate limit errors.
-        """
+        """Send images to Claude for analysis. Retries on rate limits."""
         if not images:
             raise ValueError("At least one image is required")
 
-        # Build the content array with images and text
         content = self._build_image_content(images, user_prompt)
 
         def _call():
@@ -149,17 +123,10 @@ class AnthropicVisionClient(VisionModelClient):
         messages: list[dict[str, str]],
         system_prompt: str,
     ) -> str:
-        """
-        Continue a conversation with Claude.
-
-        Takes a list of messages in the format:
-        [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-        Automatically retries with exponential backoff on rate limit errors.
-        """
+        """Continue a conversation. Retries on rate limits."""
         if not messages:
             raise ValueError("At least one message is required")
 
-        # Validate message format
         validated_messages = self._validate_messages(messages)
 
         def _call():
@@ -184,20 +151,10 @@ class AnthropicVisionClient(VisionModelClient):
         images: list[bytes],
         text_prompt: str,
     ) -> list[dict]:
-        """
-        Build the content array for a multi-image request.
-        
-        Claude expects:
-        [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "..."}},
-            {"type": "image", "source": {...}},
-            {"type": "text", "text": "..."}
-        ]
-        """
+        """Build content array: base64 images + text prompt."""
         content = []
         
         for image in images:
-            # Detect image type from magic bytes
             media_type = self._detect_image_type(image)
             
             content.append({
@@ -209,7 +166,6 @@ class AnthropicVisionClient(VisionModelClient):
                 }
             })
         
-        # Add the text prompt at the end
         content.append({
             "type": "text",
             "text": text_prompt,
@@ -218,12 +174,7 @@ class AnthropicVisionClient(VisionModelClient):
         return content
     
     def _detect_image_type(self, image_data: bytes) -> str:
-        """
-        Detect image MIME type from magic bytes.
-        
-        We could use a library like python-magic, but for our limited
-        use case (jpg/png from ffmpeg), simple byte checking is fine.
-        """
+        """Detect MIME type from magic bytes. Defaults to JPEG (ffmpeg output)."""
         if image_data[:3] == b'\xff\xd8\xff':
             return "image/jpeg"
         elif image_data[:8] == b'\x89PNG\r\n\x1a\n':
@@ -233,19 +184,13 @@ class AnthropicVisionClient(VisionModelClient):
         elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
             return "image/webp"
         else:
-            # Default to JPEG since that's what ffmpeg produces
             return "image/jpeg"
     
     def _validate_messages(
         self,
         messages: list[dict[str, str]],
     ) -> list[dict[str, str]]:
-        """
-        Validate and clean message format.
-        
-        Ensures messages alternate between user and assistant,
-        starting with user (Claude's requirement).
-        """
+        """Validate alternating user/assistant roles (Claude requirement)."""
         validated = []
         expected_role = "user"
         
@@ -258,10 +203,7 @@ class AnthropicVisionClient(VisionModelClient):
             if not content:
                 continue  # Skip empty messages
             
-            # If roles don't alternate, we might need to merge messages
-            # For now, just validate strictly
             if role != expected_role:
-                # Insert a placeholder if needed
                 logger.warning(
                     "Non-alternating message roles",
                     extra={"expected": expected_role, "got": role}
@@ -276,8 +218,7 @@ class AnthropicVisionClient(VisionModelClient):
         """Extract text content from API response."""
         if not response.content:
             return ""
-        
-        # Response content is a list of blocks
+
         text_blocks = [
             block.text
             for block in response.content
@@ -295,15 +236,7 @@ def create_anthropic_client(
     api_key: Optional[str] = None,
     model: str = "claude-sonnet-4-20250514",
 ) -> AnthropicVisionClient:
-    """
-    Factory function to create configured client.
-    
-    Reads API key from parameter or environment variable.
-    Using a factory function rather than direct construction:
-    - Centralizes configuration logic
-    - Provides sensible defaults
-    - Makes the common case simple
-    """
+    """Create client from param or ANTHROPIC_API_KEY env var."""
     import os
     
     key = api_key or os.environ.get("ANTHROPIC_API_KEY")
