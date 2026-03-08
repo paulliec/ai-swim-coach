@@ -21,8 +21,8 @@ import anthropic
 from anthropic import APIError, RateLimitError
 
 # Retry configuration for rate limit errors
-RATE_LIMIT_MAX_RETRIES = 3
-RATE_LIMIT_BASE_DELAY_SECONDS = 30  # 30s, 60s, 90s
+RATE_LIMIT_MAX_RETRIES = 2
+RATE_LIMIT_BASE_DELAY_SECONDS = 20  # 20s, 40s — max 60s total per encounter
 
 from src.core.analysis.coach import VisionModelClient
 
@@ -75,7 +75,9 @@ class AnthropicVisionClient(VisionModelClient):
     
     def __init__(self, config: AnthropicConfig) -> None:
         self._config = config
-        self._client = anthropic.Anthropic(api_key=config.api_key)
+        # Disable SDK's built-in retry so our _call_with_retry handles
+        # all rate-limit backoff — prevents double-retry compounding.
+        self._client = anthropic.Anthropic(api_key=config.api_key, max_retries=0)
     
     async def _call_with_retry(self, operation_name: str, api_call):
         """
