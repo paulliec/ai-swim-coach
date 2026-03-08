@@ -23,7 +23,16 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
-from ...core.analysis.models import StrokeType
+from ...core.analysis.models import (
+    AnalysisResult,
+    CoachingFeedback,
+    CoachingSession,
+    FeedbackPriority,
+    StrokeType,
+    TechniqueCategory,
+    TechniqueObservation,
+    VideoMetadata,
+)
 from ..dependencies import (
     AuthenticatedUser,
     KnowledgeRepositoryDep,
@@ -39,6 +48,65 @@ from ...infrastructure.video.processor import ExtractedFrame, VideoProcessingErr
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _save_agentic_session(
+    session_repo,
+    session_id: UUID,
+    video_info,
+    stroke_type: str,
+    summary: str,
+    timestamp_feedback: list,
+    frame_count: int,
+) -> None:
+    """
+    Persist an agentic analysis result to Snowflake so follow-up
+    chat can load the session context.
+    
+    The agentic analysis returns richer data than the basic AnalysisResult
+    model, so we store the summary + feedback in the closest available shape.
+    """
+    try:
+        video = VideoMetadata(
+            filename=f"session_{session_id}.mp4",
+            duration_seconds=getattr(video_info, "duration_seconds", 0.0),
+            resolution=(
+                getattr(video_info, "width", 0),
+                getattr(video_info, "height", 0),
+            ),
+            fps=getattr(video_info, "fps", 0.0),
+            file_size_bytes=0,
+            storage_path=f"videos/{session_id}/original.mp4",
+        )
+        
+        feedback_items = []
+        for fb in timestamp_feedback:
+            obs = TechniqueObservation(
+                category=TechniqueCategory.BODY_POSITION,
+                description=getattr(fb, "observation", str(fb)),
+            )
+            try:
+                cf = CoachingFeedback(
+                    priority=FeedbackPriority.SECONDARY,
+                    observation=obs,
+                    recommendation=getattr(fb, "recommendation", ""),
+                )
+                feedback_items.append(cf)
+            except Exception:
+                pass  # skip malformed items
+        
+        analysis = AnalysisResult(
+            stroke_type=StrokeType(stroke_type) if stroke_type in [s.value for s in StrokeType] else StrokeType.FREESTYLE,
+            summary=summary,
+            feedback=feedback_items,
+            frame_count_analyzed=frame_count,
+        )
+        
+        session = CoachingSession(id=session_id, video=video, analysis=analysis)
+        session_repo.save_session(session)
+        logger.info(f"Saved agentic session to Snowflake", extra={"session_id": str(session_id)})
+    except Exception as e:
+        logger.warning(f"Could not save session to Snowflake (chat won't work): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +402,7 @@ async def analyze_video_agentic(
     vision_client: VisionClientDep = None,
     knowledge_repo: KnowledgeRepositoryDep = None,
     usage_limit_repo: UsageLimitRepositoryDep = None,
+    session_repo: SessionRepositoryDep = None,
 ) -> AgenticAnalysisResponse:
     """
     Perform agentic video analysis.
@@ -645,10 +714,13 @@ Otherwise, request more specific timestamp ranges."""
             logger.warning(f"Failed to save state for resume: {e}")
             can_resume = False
         
+        partial_summary = f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}"
+        if session_repo:
+            _save_agentic_session(session_repo, session_id, video_info, request.stroke_type.value, partial_summary, [], len(all_frames))
         return AgenticAnalysisResponse(
             session_id=session_id,
             stroke_type=request.stroke_type.value,
-            summary=f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}",
+            summary=partial_summary,
             strengths=[],
             timestamp_feedback=[],
             drills=["Try again in 1-2 minutes for complete analysis"],
@@ -710,10 +782,13 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
                 logger.warning(f"Failed to save state for resume: {e}")
                 can_resume = False
             
+            partial_summary = f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}"
+            if session_repo:
+                _save_agentic_session(session_repo, session_id, video_info, request.stroke_type.value, partial_summary, [], len(all_frames))
             return AgenticAnalysisResponse(
                 session_id=session_id,
                 stroke_type=request.stroke_type.value,
-                summary=f"⚠️ Partial analysis (API rate limit reached). Here's what I observed:\n\n{last_observations}",
+                summary=partial_summary,
                 strengths=[],
                 timestamp_feedback=[],
                 drills=["Try again in 1-2 minutes for complete analysis"],
@@ -769,6 +844,16 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
     except Exception:
         pass  # ignore cleanup errors
     
+    final_summary = final_analysis.get("summary", "")
+    
+    # save session to Snowflake so follow-up chat works
+    if session_repo:
+        _save_agentic_session(
+            session_repo, session_id, video_info,
+            request.stroke_type.value, final_summary,
+            timestamp_feedback, len(all_frames),
+        )
+    
     logger.info(
         "Agentic analysis complete",
         extra={
@@ -782,7 +867,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
     return AgenticAnalysisResponse(
         session_id=session_id,
         stroke_type=request.stroke_type.value,
-        summary=final_analysis.get("summary", ""),
+        summary=final_summary,
         strengths=final_analysis.get("strengths", []),
         timestamp_feedback=timestamp_feedback,
         drills=final_analysis.get("drills", []),
@@ -813,6 +898,7 @@ async def resume_video_analysis(
     vision_client: VisionClientDep = None,
     knowledge_repo: KnowledgeRepositoryDep = None,
     usage_limit_repo: UsageLimitRepositoryDep = None,
+    session_repo: SessionRepositoryDep = None,
 ) -> AgenticAnalysisResponse:
     """
     Resume an interrupted agentic analysis.
@@ -1174,6 +1260,22 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
     except:
         pass
     
+    resume_summary = final_analysis.get("summary", "")
+    
+    # save session so follow-up chat works
+    if session_repo:
+        # build a minimal video_info-like object from saved state
+        class _VideoInfo:
+            duration_seconds = saved_state.get("video_duration", 0.0)
+            width = 0
+            height = 0
+            fps = 0.0
+        _save_agentic_session(
+            session_repo, session_id, _VideoInfo(),
+            stroke_type, resume_summary,
+            timestamp_feedback, len(all_frames),
+        )
+    
     logger.info(
         "Resume analysis complete",
         extra={
@@ -1186,7 +1288,7 @@ IMPORTANT: Reference specific timestamps (e.g., "At 0:12-0:14, your catch...")""
     return AgenticAnalysisResponse(
         session_id=session_id,
         stroke_type=stroke_type,
-        summary=final_analysis.get("summary", ""),
+        summary=resume_summary,
         strengths=final_analysis.get("strengths", []),
         timestamp_feedback=timestamp_feedback,
         drills=final_analysis.get("drills", []),
