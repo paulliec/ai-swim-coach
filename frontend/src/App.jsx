@@ -837,15 +837,41 @@ function App() {
 
               {/* Error Display */}
               {error && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex items-start justify-between">
-                  <p className="text-red-700 flex-1">{error}</p>
-                  <button
-                    onClick={() => setError(null)}
-                    className="text-red-700 hover:text-red-900 ml-4"
-                    aria-label="Dismiss error"
-                  >
-                    ✕
-                  </button>
+                <div className={`rounded-lg p-4 mb-6 ${
+                  error.includes('daily limit') || error.includes('Come back tomorrow')
+                    ? 'bg-amber-50 border border-amber-300'
+                    : 'bg-red-50 border border-red-200'
+                }`}>
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      {error.includes('daily limit') || error.includes('Come back tomorrow') ? (
+                        <>
+                          <p className="text-amber-800 font-medium mb-1">Daily Limit Reached</p>
+                          <p className="text-amber-700 text-sm mb-3">
+                            You've used your free analyses for today.
+                            {!user && ' Sign in to get more, or come back tomorrow.'}
+                            {user && ' Come back tomorrow for more analyses.'}
+                          </p>
+                          {!user && (
+                            <SignInButton mode="modal">
+                              <button className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium">
+                                Sign In for More Access
+                              </button>
+                            </SignInButton>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-red-700">{error}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setError(null)}
+                      className={`ml-4 ${error.includes('daily limit') || error.includes('Come back tomorrow') ? 'text-amber-700 hover:text-amber-900' : 'text-red-700 hover:text-red-900'}`}
+                      aria-label="Dismiss error"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </div>
               )}
               
