@@ -90,13 +90,17 @@ class FrameRequest:
     reason: str
     fps: float = 2.0  # how many frames per second in this range
     
+    # max window the AI can request - forces narrow, targeted asks
+    MAX_WINDOW_SECONDS: float = 2.0
+
     @property
     def timestamps(self) -> list[float]:
         """Generate list of timestamps to extract."""
+        capped_end = min(self.end_seconds, self.start_seconds + self.MAX_WINDOW_SECONDS)
         result = []
         t = self.start_seconds
         interval = 1.0 / self.fps
-        while t <= self.end_seconds:
+        while t <= capped_end:
             result.append(round(t, 2))
             t += interval
         return result
@@ -205,6 +209,7 @@ Structure your response as JSON with these fields:
 ## Guidelines
 - Reference specific timestamps: "At 0:12, your elbow..." not "your elbow sometimes..."
 - Only request more frames if genuinely needed (limit requests to 2-3 per iteration)
+- Keep frame request windows NARROW (under 2 seconds). Target a single stroke cycle or moment, not a broad time range. For example, request 3.0-4.0s to see one catch, not 2.0-8.0s to scan the whole pull
 - Each frame request should target a specific technique element
 - Prioritize feedback: one PRIMARY issue, then SECONDARY
 - Be specific about what you see vs. what to do
@@ -239,7 +244,7 @@ class AgenticSwimCoach:
         frame_extractor: VideoFrameExtractor,
         max_iterations: int = 3,
         initial_fps: float = 0.5,  # one frame every 2 seconds for initial pass
-        max_frames_per_request: int = 10,
+        max_frames_per_request: int = 5,
     ) -> None:
         self._vision_client = vision_client
         self._frame_extractor = frame_extractor
