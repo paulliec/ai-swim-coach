@@ -321,19 +321,21 @@ function App() {
     }
   }
 
-  // Poll session status until the background analysis finishes (or times out).
-  // Shows real progress (elapsed + status) rather than an indefinite spinner.
-  const pollSession = async (sid) => {
-    const POLL_INTERVAL_MS = 3000
-    const TIMEOUT_MS = 4 * 60 * 1000
+  // Poll a session until its background job reaches a terminal state. Bounded by
+  // BOTH a wall-clock timeout and a max attempt count so we never poll forever —
+  // a stuck job eventually gets swept server-side to "failed" anyway.
+  // Returns the raw session payload on success; throws on failed/timeout.
+  const pollUntilTerminal = async (sid, { intervalMs = 3000, timeoutMs, maxAttempts }) => {
     const start = Date.now()
+    let attempts = 0
     const headers = {
       'X-API-Key': apiKey,
       'X-User-Id': user?.id || 'anonymous',
       'X-User-Email': user?.primaryEmailAddress?.emailAddress || ''
     }
 
-    while (Date.now() - start < TIMEOUT_MS) {
+    while (Date.now() - start < timeoutMs && attempts < maxAttempts) {
+      attempts++
       const elapsed = Math.round((Date.now() - start) / 1000)
       setAnalyzeElapsed(elapsed)
       setAnalyzingLong(elapsed >= 60)
@@ -346,22 +348,49 @@ function App() {
         // transient network hiccup — keep polling
       }
 
-      if (data?.status === 'complete') {
-        return {
-          session_id: sid,
-          stroke_type: data.stroke_type,
-          summary: data.summary,
-          feedback: data.feedback || [],
-          frame_count: frames.length,
-        }
-      }
+      if (data?.status === 'complete') return data
       if (data?.status === 'failed') {
         throw new Error(data.error || 'Analysis failed. Please try again.')
       }
 
-      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+      await new Promise(r => setTimeout(r, intervalMs))
     }
-    throw new Error('Analysis is taking longer than expected. Please check back shortly.')
+    throw new Error('Analysis timed out. Please check back shortly or try again.')
+  }
+
+  // Frame-mode poll: shorter ceiling (single-pass analysis).
+  const pollSession = async (sid) => {
+    const data = await pollUntilTerminal(sid, {
+      timeoutMs: 4 * 60 * 1000,  // 4 min
+      maxAttempts: 100,
+    })
+    return {
+      session_id: sid,
+      stroke_type: data.stroke_type,
+      summary: data.summary,
+      feedback: data.feedback || [],
+      frame_count: frames.length,
+    }
+  }
+
+  // Video/agentic poll: longer ceiling (multi-pass + server-side throttles).
+  // GET session only carries summary + generic feedback, so the rich agentic
+  // structures (strengths/timestamp_feedback/drills) just don't render here.
+  const pollVideoSession = async (sid) => {
+    const data = await pollUntilTerminal(sid, {
+      timeoutMs: 5 * 60 * 1000,  // 5 min
+      maxAttempts: 120,
+    })
+    return {
+      session_id: sid,
+      stroke_type: data.stroke_type,
+      summary: data.summary,
+      feedback: data.feedback || [],
+      frame_count: 0,
+      partial: data.partial || false,
+      can_resume: data.can_resume || false,
+      isAgentic: true,
+    }
   }
 
   // Upload frames and analyze
@@ -538,10 +567,12 @@ function App() {
         fps: uploadData.fps
       })
       
-      // Step 2: Run agentic analysis
+      // Step 2: Kick off agentic analysis — returns 202, runs in the background
       setAgenticProgress('Starting AI analysis...')
       setAnalyzing(true)
-      
+      setAnalyzeElapsed(0)
+      setAnalyzingLong(false)
+
       const analyzeRes = await fetch(`${API_BASE}/video/${uploadData.session_id}/analyze`, {
         method: 'POST',
         headers: {
@@ -557,7 +588,7 @@ function App() {
           max_iterations: 3
         })
       })
-      
+
       if (!analyzeRes.ok) {
         const errData = await analyzeRes.json().catch(() => ({}))
         if (analyzeRes.status === 429) {
@@ -565,25 +596,12 @@ function App() {
         }
         throw new Error(errData.detail || 'Analysis failed')
       }
-      
-      const analysisData = await analyzeRes.json()
-      
-      // Convert agentic response to display format
-      setAnalysis({
-        session_id: analysisData.session_id,
-        stroke_type: analysisData.stroke_type,
-        summary: analysisData.summary,
-        strengths: analysisData.strengths,
-        timestamp_feedback: analysisData.timestamp_feedback,
-        drills: analysisData.drills,
-        frame_count: analysisData.total_frames_analyzed,
-        iterations: analysisData.iterations_used,
-        analysis_progress: analysisData.analysis_progress || [],  // progress from each iteration
-        partial: analysisData.partial || false,  // true if analysis was interrupted
-        can_resume: analysisData.can_resume || false,  // true if can resume from where it left off
-        isAgentic: true  // Flag to render timestamp UI
-      })
-      
+
+      // Step 3: Poll for the result (bounded — won't poll forever)
+      setAgenticProgress('Analyzing your technique...')
+      const analysisData = await pollVideoSession(uploadData.session_id)
+      setAnalysis(analysisData)
+
       if (!user) {
         localStorage.setItem('anonymous_session_id', analysisData.session_id)
         setAnonymousSessionId(analysisData.session_id)
@@ -596,6 +614,8 @@ function App() {
     } finally {
       setVideoUploading(false)
       setAnalyzing(false)
+      setAnalyzingLong(false)
+      setAnalyzeElapsed(0)
       setAgenticProgress('')
     }
   }
@@ -617,9 +637,12 @@ function App() {
     
     setAnalyzing(true)
     setError(null)
+    setAnalyzeElapsed(0)
+    setAnalyzingLong(false)
     setAgenticProgress('Resuming analysis...')
-    
+
     try {
+      // Resume now returns 202 and finishes in the background — poll like analyze.
       const resumeRes = await fetch(`${API_BASE}/video/${resumeSessionId}/resume`, {
         method: 'POST',
         headers: {
@@ -629,34 +652,22 @@ function App() {
           'Content-Type': 'application/json'
         }
       })
-      
+
       if (!resumeRes.ok) {
         const errData = await resumeRes.json().catch(() => ({}))
         throw new Error(errData.detail || 'Resume failed')
       }
-      
-      const analysisData = await resumeRes.json()
-      
-      setAnalysis({
-        session_id: analysisData.session_id,
-        stroke_type: analysisData.stroke_type,
-        summary: analysisData.summary,
-        strengths: analysisData.strengths,
-        timestamp_feedback: analysisData.timestamp_feedback,
-        drills: analysisData.drills,
-        frame_count: analysisData.total_frames_analyzed,
-        iterations: analysisData.iterations_used,
-        analysis_progress: analysisData.analysis_progress || [],
-        partial: analysisData.partial || false,
-        can_resume: analysisData.can_resume || false,
-        isAgentic: true
-      })
-      
+
+      const analysisData = await pollVideoSession(resumeSessionId)
+      setAnalysis(analysisData)
+
     } catch (err) {
       setError(err.message)
       console.error('Resume analysis error:', err)
     } finally {
       setAnalyzing(false)
+      setAnalyzingLong(false)
+      setAnalyzeElapsed(0)
       setAgenticProgress('')
     }
   }

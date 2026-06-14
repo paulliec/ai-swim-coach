@@ -23,6 +23,7 @@ from ...core.analysis.models import (
 from ..dependencies import (
     AuthenticatedUser,
     SessionRepositoryDep,
+    StorageClientDep,
     SwimCoachDep,
 )
 from .analysis import FeedbackItem
@@ -77,6 +78,11 @@ class SessionDetailResponse(BaseModel):
     stroke_type: str | None = Field(None, description="Stroke type if analyzed")
     summary: str | None = Field(None, description="Analysis summary if available")
     feedback: list[FeedbackItem] = Field(default_factory=list, description="Coaching feedback items when complete")
+
+    # Agentic partial/resume: a completed-but-interrupted run leaves resume state in
+    # storage. partial == there's more to compute; can_resume == it can be picked up.
+    partial: bool = Field(default=False, description="True if the result is partial (agentic run interrupted)")
+    can_resume: bool = Field(default=False, description="True if an interrupted agentic run can be resumed")
 
     # Conversation
     message_count: int = Field(description="Number of messages in conversation")
@@ -265,13 +271,14 @@ async def get_session(
     x_user_id: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     repository: SessionRepositoryDep = None,
+    storage: StorageClientDep = None,
 ) -> SessionDetailResponse:
     """Retrieve complete session with video metadata, analysis, and conversation."""
     logger.info(
         "Retrieving session",
         extra={"session_id": str(session_id)}
     )
-    
+
     try:
         session = repository.get_session(session_id)
     except Exception as e:
@@ -292,7 +299,21 @@ async def get_session(
         )
         for msg in session.conversation
     ]
-    
+
+    # An interrupted agentic run leaves resume state in storage. Only check once the
+    # job has finished (complete) — no point hitting storage on every processing poll.
+    partial = can_resume = False
+    if storage is not None and _display_status(session) == ANALYSIS_COMPLETE:
+        try:
+            state = await storage.load_analysis_state(session_id)
+            can_resume = state is not None
+            partial = can_resume
+        except Exception as e:
+            logger.warning(
+                "Could not check resume state",
+                extra={"session_id": str(session_id), "error": str(e)}
+            )
+
     return SessionDetailResponse(
         session_id=session.id,
         created_at=session.created_at.isoformat(),
@@ -305,6 +326,8 @@ async def get_session(
         stroke_type=session.analysis.stroke_type.value if session.analysis else None,
         summary=session.analysis.summary if session.analysis else None,
         feedback=_feedback_items(session),
+        partial=partial,
+        can_resume=can_resume,
         message_count=len(session.conversation),
         messages=messages,
     )

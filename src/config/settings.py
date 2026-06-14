@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     max_video_size_mb: int = Field(default=100)
     video_processor_mock_mode: bool = Field(default=False)
     log_level: str = Field(default="INFO")
+
+    # Stale-job sweeper — BackgroundTasks is in-process/non-durable, so a worker
+    # restart mid-analysis leaves a session stuck in "processing" forever. The
+    # sweeper flips anything stuck past the threshold to "failed".
+    stale_job_threshold_minutes: int = Field(default=10)
+    sweeper_interval_seconds: int = Field(default=120)
+    sweeper_enabled: bool = Field(default=True)
     cors_origins: str = Field(default="http://localhost:3000,https://ai-swim-coach.pages.dev")
     
     model_config = SettingsConfigDict(

@@ -6,6 +6,7 @@ Dev: uvicorn src.main:app --reload
 Prod: gunicorn src.main:app -w 4 -k uvicorn.workers.UvicornWorker
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api.routes import analysis, health, sessions, video
+from .api.sweeper import sweeper_loop
 from .config.settings import get_settings
 
 # Configure logging
@@ -48,8 +50,23 @@ async def lifespan(app: FastAPI):
             extra={"missing_fields": missing_fields}
         )
         # TODO: fix later - should fail fast in prod, log-and-continue in dev
-    
+
+    # Start the stale-job sweeper (unsticks orphaned "processing" sessions).
+    sweeper_stop: asyncio.Event | None = None
+    sweeper_task: asyncio.Task | None = None
+    if settings.sweeper_enabled:
+        sweeper_stop = asyncio.Event()
+        sweeper_task = asyncio.create_task(sweeper_loop(settings, sweeper_stop))
+
     yield
+
+    if sweeper_task is not None:
+        sweeper_stop.set()
+        try:
+            await asyncio.wait_for(sweeper_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            sweeper_task.cancel()
+
     logger.info("SwimCoach API shutting down")
 
 

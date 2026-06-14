@@ -230,10 +230,24 @@ class MockSnowflakeCursor:
             self._rowcount = 1
     
     def _handle_select(self, query: str, params: Optional[tuple]) -> None:
+        # Stale-job sweeper scan: selects all 'processing' rows (no bound params).
+        # Must run before the no-params early-return below.
+        if 'FROM COACHING_SESSIONS' in query and 'PROCESSING' in query:
+            rows = []
+            for record in self._storage['coaching_sessions'].values():
+                p = record.get('params', ())
+                status = p[3] if len(p) > 3 else None
+                updated_at = p[12] if len(p) > 12 else None
+                if status == 'processing':
+                    session_id = p[0] if len(p) > 0 else record.get('session_id')
+                    rows.append((session_id, updated_at))
+            self._results = rows
+            return
+
         if not params:
             self._results = []
             return
-        
+
         if 'FROM COACHING_SESSIONS' in query and 'WHERE' in query:
             session_id = str(params[0])
             session = self._storage['coaching_sessions'].get(session_id)
@@ -335,6 +349,33 @@ class MockSnowflakeCursor:
     
     def _handle_update(self, query: str, params: Optional[tuple]) -> None:
         if not params:
+            return
+
+        if 'COACHING_SESSIONS' in query:
+            # Sweeper UPDATE: SET status='failed', error_message=%s, updated_at=%s
+            # WHERE session_id=%s. Rewrite the stored MERGE params in place,
+            # mirroring _upsert_session positions (status 3/9, error 4/10, updated 5/12).
+            message = params[0]
+            new_updated = params[1]
+            session_id = str(params[2])
+
+            record = self._storage['coaching_sessions'].get(session_id)
+            if not record:
+                self._rowcount = 0
+                return
+
+            p = list(record['params'])
+            for idx in (3, 9):
+                if len(p) > idx:
+                    p[idx] = 'failed'
+            for idx in (4, 10):
+                if len(p) > idx:
+                    p[idx] = message
+            for idx in (5, 12):
+                if len(p) > idx:
+                    p[idx] = new_updated
+            record['params'] = tuple(p)
+            self._rowcount = 1
             return
 
         if 'USAGE_LIMITS' in query:

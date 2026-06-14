@@ -360,3 +360,235 @@ class TestAsyncAnalysisFlow:
             headers={"X-API-Key": api_key},
         )
         assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Agentic (video-mode) Async Analysis Tests
+# ---------------------------------------------------------------------------
+
+import src.api.routes.video as video_routes
+
+# Canned agentic JSON so tests never hit the real Anthropic API.
+_INITIAL_READY = (
+    '{"observations": "Solid freestyle overall", "strengths": ["good streamline"], '
+    '"areas_to_examine": [], "ready_to_provide_feedback": true}'
+)
+_FINAL_JSON = (
+    '{"summary": "Good freestyle, focus on the catch.", "strengths": ["body line"], '
+    '"timestamp_feedback": [{"start_timestamp": 2.0, "end_timestamp": 3.0, '
+    '"category": "catch_and_pull", "observation": "elbow drops at 0:02", '
+    '"recommendation": "lead with the elbow", "priority": "primary"}], '
+    '"drills": ["catch-up drill"]}'
+)
+
+
+class _FakeVision:
+    """Stand-in vision client. Branches on the detailed (final) system prompt."""
+
+    def __init__(self, initial=_INITIAL_READY, final=_FINAL_JSON, fail_final=False):
+        self._initial = initial
+        self._final = final
+        self._fail_final = fail_final
+
+    async def analyze_images(self, images, system_prompt, user_prompt):
+        if "final analysis" in system_prompt.lower():
+            if self._fail_final:
+                raise RuntimeError("rate limit reached, slow down")
+            return self._final
+        return self._initial
+
+
+def _upload_video(client, api_key):
+    """Upload a fake video (mock processor ignores bytes) and return session_id."""
+    res = client.post(
+        "/api/v1/video/upload",
+        files=[("video", ("clip.mp4", b"\x00\x00fakevideobytes", "video/mp4"))],
+        headers={"X-API-Key": api_key},
+    )
+    assert res.status_code == 201, res.text
+    return res.json()["session_id"]
+
+
+@pytest.fixture
+def fast_agentic(monkeypatch):
+    """Kill the throttle sleeps and swap in the fake vision client by default."""
+    monkeypatch.setattr(video_routes, "API_CALL_DELAY_SECONDS", 0)
+    monkeypatch.setattr(video_routes, "get_vision_client", lambda settings: _FakeVision())
+    return monkeypatch
+
+
+class TestAgenticAsyncFlow:
+    """The agentic video endpoint now runs in the background and is polled via GET session."""
+
+    def test_video_upload_creates_pending_session(self, client, api_key):
+        """Uploading a video pre-creates a pending session row."""
+        session_id = _upload_video(client, api_key)
+        res = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "pending"
+        assert data["has_video"] is True
+
+    def test_analyze_returns_202_and_completes(self, client, api_key, fast_agentic):
+        """POST analyze returns 202; background job persists feedback; poll sees complete."""
+        session_id = _upload_video(client, api_key)
+
+        res = client.post(
+            f"/api/v1/video/{session_id}/analyze",
+            json={"stroke_type": "freestyle", "user_notes": "catch help", "max_iterations": 2},
+            headers={"X-API-Key": api_key},
+        )
+        assert res.status_code == 202
+        assert res.json()["status"] == "processing"
+
+        # TestClient drains background tasks before returning, so it's done now.
+        detail = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+        data = detail.json()
+        assert data["status"] == "complete"
+        assert data["is_analyzed"] is True
+        assert data["stroke_type"] == "freestyle"
+        assert "catch" in data["summary"].lower()
+        assert len(data["feedback"]) >= 1
+        assert data["partial"] is False
+        assert data["can_resume"] is False
+
+    def test_rate_limited_final_pass_is_partial_and_resumable(self, client, api_key, monkeypatch):
+        """A rate limit on the final pass saves resume state; poll reports partial + can_resume."""
+        monkeypatch.setattr(video_routes, "API_CALL_DELAY_SECONDS", 0)
+        monkeypatch.setattr(
+            video_routes, "get_vision_client", lambda settings: _FakeVision(fail_final=True)
+        )
+
+        session_id = _upload_video(client, api_key)
+
+        res = client.post(
+            f"/api/v1/video/{session_id}/analyze",
+            json={"stroke_type": "freestyle", "max_iterations": 2},
+            headers={"X-API-Key": api_key},
+        )
+        assert res.status_code == 202
+
+        detail = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+        data = detail.json()
+        assert data["status"] == "complete"
+        assert data["partial"] is True
+        assert data["can_resume"] is True
+        assert "partial" in data["summary"].lower()
+
+    def test_resume_returns_202_and_completes(self, client, api_key, fast_agentic):
+        """Resume picks up saved state in the background and finishes the analysis."""
+        # First produce a partial (rate limit on final), then resume to completion.
+        fast_agentic.setattr(
+            video_routes, "get_vision_client", lambda settings: _FakeVision(fail_final=True)
+        )
+        session_id = _upload_video(client, api_key)
+        client.post(
+            f"/api/v1/video/{session_id}/analyze",
+            json={"stroke_type": "freestyle", "max_iterations": 2},
+            headers={"X-API-Key": api_key},
+        )
+        partial = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key}).json()
+        assert partial["can_resume"] is True
+
+        # Now let the final pass succeed and resume.
+        fast_agentic.setattr(video_routes, "get_vision_client", lambda settings: _FakeVision())
+        res = client.post(f"/api/v1/video/{session_id}/resume", headers={"X-API-Key": api_key})
+        assert res.status_code == 202
+        assert res.json()["status"] == "processing"
+
+        done = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key}).json()
+        assert done["status"] == "complete"
+        assert done["partial"] is False
+        assert done["can_resume"] is False
+        assert len(done["feedback"]) >= 1
+
+    def test_analyze_unknown_session_404(self, client, api_key, fast_agentic):
+        """Analyzing a video session that was never uploaded returns 404."""
+        res = client.post(
+            f"/api/v1/video/{uuid4()}/analyze",
+            json={"stroke_type": "freestyle"},
+            headers={"X-API-Key": api_key},
+        )
+        assert res.status_code == 404
+
+    def test_resume_without_state_404(self, client, api_key):
+        """Resuming a session with no saved state returns 404."""
+        session_id = _upload_video(client, api_key)
+        res = client.post(f"/api/v1/video/{session_id}/resume", headers={"X-API-Key": api_key})
+        assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Stale-job Sweeper Tests
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta
+
+from src.core.analysis.models import (
+    ANALYSIS_PROCESSING,
+    CoachingSession,
+    VideoMetadata,
+)
+from src.infrastructure.snowflake.client import MockSnowflakeConnection
+from src.infrastructure.snowflake.repositories.sessions import SessionRepository
+
+
+def _processing_session(updated_at: datetime) -> CoachingSession:
+    session = CoachingSession(
+        id=uuid4(),
+        video=VideoMetadata(filename="clip.mp4"),
+        status=ANALYSIS_PROCESSING,
+    )
+    session.updated_at = updated_at
+    return session
+
+
+class TestStaleJobSweeper:
+    """The sweeper flips sessions stuck in 'processing' past the threshold to 'failed'."""
+
+    def test_flips_stale_processing_to_failed(self):
+        conn = MockSnowflakeConnection()
+        repo = SessionRepository(conn)
+
+        stale = _processing_session(datetime.utcnow() - timedelta(minutes=30))
+        repo.save_session(stale)
+
+        flipped = repo.fail_stale_processing(threshold_minutes=10)
+        assert flipped == 1
+
+        loaded = repo.get_session(stale.id)
+        assert loaded.status == "failed"
+        assert loaded.error and "timed out" in loaded.error.lower()
+
+    def test_leaves_fresh_processing_alone(self):
+        conn = MockSnowflakeConnection()
+        repo = SessionRepository(conn)
+
+        fresh = _processing_session(datetime.utcnow())  # just started
+        repo.save_session(fresh)
+
+        flipped = repo.fail_stale_processing(threshold_minutes=10)
+        assert flipped == 0
+
+        loaded = repo.get_session(fresh.id)
+        assert loaded.status == "processing"
+
+    def test_sweep_once_runs_in_mock_mode(self):
+        """The sweeper entrypoint runs end-to-end against the shared mock connection."""
+        import asyncio
+
+        from src.api.dependencies import get_mock_snowflake_connection
+        from src.api.sweeper import sweep_stale_jobs_once
+        from src.config.settings import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+
+        conn = get_mock_snowflake_connection()
+        repo = SessionRepository(conn)
+        stale = _processing_session(datetime.utcnow() - timedelta(minutes=30))
+        repo.save_session(stale)
+
+        flipped = asyncio.run(sweep_stale_jobs_once(settings))
+        assert flipped >= 1
+        assert repo.get_session(stale.id).status == "failed"

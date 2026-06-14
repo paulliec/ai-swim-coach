@@ -7,7 +7,7 @@ Translates between domain models and database rows.
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Protocol
 from uuid import UUID
 
@@ -177,6 +177,64 @@ class SessionRepository:
         finally:
             cursor.close()
     
+    def fail_stale_processing(
+        self,
+        threshold_minutes: int,
+        now: Optional[datetime] = None,
+    ) -> int:
+        """Flip sessions stuck in 'processing' past the threshold to 'failed'.
+
+        BackgroundTasks is in-process and non-durable: a worker restart mid-job
+        orphans the session in 'processing'. This is the janitor that unsticks them.
+        Returns the number of sessions flipped. `now` is injectable for tests.
+        """
+        now = now or datetime.utcnow()
+        cutoff = now - timedelta(minutes=threshold_minutes)
+        cursor = self._conn.cursor()
+
+        try:
+            # Scan for processing rows, then filter by age in Python — keeps the
+            # mock cursor simple and avoids timezone surprises in SQL date math.
+            cursor.execute("""
+                SELECT session_id, updated_at
+                FROM coaching_sessions
+                WHERE status = 'processing'
+            """)
+            rows = cursor.fetchall()
+
+            stale_ids = [
+                row[0] for row in rows
+                if row[1] is not None and row[1] < cutoff
+            ]
+
+            if not stale_ids:
+                return 0
+
+            message = (
+                f"Analysis timed out — stuck in processing for over "
+                f"{threshold_minutes} minutes (the worker likely restarted mid-job). "
+                f"Please try again."
+            )
+            for session_id in stale_ids:
+                cursor.execute("""
+                    UPDATE coaching_sessions
+                    SET status = 'failed',
+                        error_message = %s,
+                        updated_at = %s
+                    WHERE session_id = %s
+                """, (message, now, str(session_id)))
+
+            self._conn.commit()
+
+            logger.info(
+                "Swept stale processing sessions",
+                extra={"count": len(stale_ids), "threshold_minutes": threshold_minutes}
+            )
+            return len(stale_ids)
+
+        finally:
+            cursor.close()
+
     # -----------------------------------------------------------------------
     # Private Methods
     # -----------------------------------------------------------------------
