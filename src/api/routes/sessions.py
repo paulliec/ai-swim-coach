@@ -13,12 +13,19 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ...core.analysis.models import CoachingSession
+from ...core.analysis.models import (
+    ANALYSIS_COMPLETE,
+    ANALYSIS_FAILED,
+    ANALYSIS_PENDING,
+    ANALYSIS_PROCESSING,
+    CoachingSession,
+)
 from ..dependencies import (
     AuthenticatedUser,
     SessionRepositoryDep,
     SwimCoachDep,
 )
+from .analysis import FeedbackItem
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +72,38 @@ class SessionDetailResponse(BaseModel):
     
     # Analysis info
     is_analyzed: bool = Field(description="Whether video has been analyzed")
+    status: str = Field(default=ANALYSIS_PENDING, description="Analysis job status: pending, processing, complete, failed")
+    error: str | None = Field(None, description="Failure detail when status is failed")
     stroke_type: str | None = Field(None, description="Stroke type if analyzed")
     summary: str | None = Field(None, description="Analysis summary if available")
-    
+    feedback: list[FeedbackItem] = Field(default_factory=list, description="Coaching feedback items when complete")
+
     # Conversation
     message_count: int = Field(description="Number of messages in conversation")
     messages: list[MessageItem] = Field(description="Full conversation history")
+
+
+def _display_status(session: CoachingSession) -> str:
+    """Normalize stored status for the client; map legacy 'active' rows sensibly."""
+    if session.status in (ANALYSIS_PENDING, ANALYSIS_PROCESSING, ANALYSIS_COMPLETE, ANALYSIS_FAILED):
+        return session.status
+    return ANALYSIS_COMPLETE if session.is_analyzed else ANALYSIS_PENDING
+
+
+def _feedback_items(session: CoachingSession) -> list[FeedbackItem]:
+    """Serialize persisted coaching feedback for the response."""
+    if not session.analysis:
+        return []
+    return [
+        FeedbackItem(
+            priority=fb.priority.value,
+            category=fb.observation.category.value,
+            observation=fb.observation.description,
+            recommendation=fb.recommendation,
+            drill_suggestions=fb.drill_suggestions,
+        )
+        for fb in session.analysis.feedback
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +158,8 @@ async def list_sessions(
             has_video=session.has_video,
             video_filename=session.video.filename if session.video else None,
             is_analyzed=session.is_analyzed,
+            status=_display_status(session),
+            error=session.error,
             stroke_type=session.analysis.stroke_type.value if session.analysis else None,
             summary=session.analysis.summary if session.analysis else None,
             message_count=len(session.conversation),
@@ -265,8 +300,11 @@ async def get_session(
         has_video=session.has_video,
         video_filename=session.video.filename if session.video else None,
         is_analyzed=session.is_analyzed,
+        status=_display_status(session),
+        error=session.error,
         stroke_type=session.analysis.stroke_type.value if session.analysis else None,
         summary=session.analysis.summary if session.analysis else None,
+        feedback=_feedback_items(session),
         message_count=len(session.conversation),
         messages=messages,
     )

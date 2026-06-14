@@ -26,6 +26,8 @@ os.environ["R2_MOCK_MODE"] = "true"
 os.environ["VIDEO_PROCESSOR_MOCK_MODE"] = "true"
 os.environ["API_KEYS"] = "test-api-key"
 os.environ["ANTHROPIC_API_KEY"] = "test-key"
+# Treat the test key as trusted so rate limiting doesn't trip across many analyses
+os.environ["RATE_LIMIT_BYPASS_KEYS"] = "test-api-key"
 
 from src.main import app
 
@@ -234,3 +236,127 @@ class TestFullAnalysisFlow:
         # )
         # assert analyze_response.status_code == 200
         # assert "summary" in analyze_response.json()
+
+
+# ---------------------------------------------------------------------------
+# Async Analysis Job Tests
+# ---------------------------------------------------------------------------
+
+from src.api.dependencies import get_swim_coach
+from src.core.analysis.models import (
+    AnalysisResult,
+    CoachingFeedback,
+    FeedbackPriority,
+    StrokeType,
+    TechniqueCategory,
+    TechniqueObservation,
+)
+
+
+class _FakeCoach:
+    """Stand-in for SwimCoach so tests don't call the real Anthropic API."""
+
+    async def analyze_video(self, frames, stroke_type=StrokeType.FREESTYLE, user_notes="", knowledge_context=None):
+        return AnalysisResult(
+            stroke_type=stroke_type,
+            summary="SUMMARY: Solid freestyle.\nPRIMARY FOCUS: Improve the catch.",
+            feedback=[
+                CoachingFeedback(
+                    priority=FeedbackPriority.PRIMARY,
+                    observation=TechniqueObservation(
+                        category=TechniqueCategory.CATCH_AND_PULL,
+                        description="Elbow drops during the catch",
+                    ),
+                    recommendation="Lead with your elbow — early vertical forearm",
+                    drill_suggestions=["catch-up drill"],
+                )
+            ],
+        )
+
+
+class _FailingCoach:
+    async def analyze_video(self, *args, **kwargs):
+        raise RuntimeError("boom from claude")
+
+
+def _upload(client, api_key, mock_frame, count=2):
+    files = [("frames", (f"frame{i}.jpg", mock_frame, "image/jpeg")) for i in range(count)]
+    res = client.post(
+        "/api/v1/analysis/upload",
+        files=files,
+        data={"stroke_type": "freestyle"},
+        headers={"X-API-Key": api_key},
+    )
+    assert res.status_code == 201
+    return res.json()["session_id"]
+
+
+class TestAsyncAnalysisFlow:
+    """The new background-job analysis path (poll GET session for the result)."""
+
+    def test_session_pending_before_analysis(self, client, api_key, mock_frame):
+        """A freshly uploaded session reports pending and is not analyzed."""
+        session_id = _upload(client, api_key, mock_frame)
+
+        res = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "pending"
+        assert data["is_analyzed"] is False
+
+    def test_analyze_returns_202_and_completes(self, client, api_key, mock_frame):
+        """POST analyze returns 202; the background job persists feedback."""
+        app.dependency_overrides[get_swim_coach] = lambda: _FakeCoach()
+        try:
+            session_id = _upload(client, api_key, mock_frame)
+
+            res = client.post(
+                f"/api/v1/analysis/{session_id}/analyze",
+                json={"stroke_type": "freestyle", "user_notes": "catch help"},
+                headers={"X-API-Key": api_key},
+            )
+            assert res.status_code == 202
+            assert res.json()["status"] == "processing"
+
+            # TestClient runs background tasks before returning, so it's done now.
+            detail = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+            assert detail.status_code == 200
+            data = detail.json()
+            assert data["status"] == "complete"
+            assert data["is_analyzed"] is True
+            assert data["stroke_type"] == "freestyle"
+            assert "freestyle" in data["summary"].lower() or "catch" in data["summary"].lower()
+            assert len(data["feedback"]) >= 1
+            assert data["feedback"][0]["priority"] == "primary"
+        finally:
+            app.dependency_overrides.pop(get_swim_coach, None)
+
+    def test_analyze_failure_surfaces_as_failed(self, client, api_key, mock_frame):
+        """A crashing analysis records status=failed with an error message."""
+        app.dependency_overrides[get_swim_coach] = lambda: _FailingCoach()
+        try:
+            session_id = _upload(client, api_key, mock_frame)
+
+            res = client.post(
+                f"/api/v1/analysis/{session_id}/analyze",
+                json={"stroke_type": "freestyle"},
+                headers={"X-API-Key": api_key},
+            )
+            assert res.status_code == 202
+
+            detail = client.get(f"/api/v1/sessions/{session_id}", headers={"X-API-Key": api_key})
+            data = detail.json()
+            assert data["status"] == "failed"
+            assert data["error"] and "boom" in data["error"]
+            assert data["is_analyzed"] is False
+        finally:
+            app.dependency_overrides.pop(get_swim_coach, None)
+
+    def test_analyze_unknown_session_404(self, client, api_key):
+        """Analyzing a session that doesn't exist returns 404."""
+        res = client.post(
+            f"/api/v1/analysis/{uuid4()}/analyze",
+            json={"stroke_type": "freestyle"},
+            headers={"X-API-Key": api_key},
+        )
+        assert res.status_code == 404

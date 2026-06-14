@@ -65,12 +65,14 @@ class AnthropicVisionClient(VisionModelClient):
         Call the Anthropic API with exponential backoff on rate limit errors.
 
         Retries up to RATE_LIMIT_MAX_RETRIES times with increasing delays
-        (30s, 60s, 90s) before giving up. This keeps the request alive
-        server-side so the client doesn't need to poll or resume.
+        (20s, 40s) before giving up.
         """
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
-                return api_call()
+                # SDK client is synchronous — run it off the event loop so a
+                # 30-90s vision call doesn't block every other request (incl.
+                # status polling) while it's in flight.
+                return await asyncio.to_thread(api_call)
             except RateLimitError as e:
                 if attempt >= RATE_LIMIT_MAX_RETRIES:
                     logger.warning(

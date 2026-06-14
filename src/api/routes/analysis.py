@@ -8,25 +8,43 @@ import logging
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from ...core.analysis.coach import FrameSet
+from ...config.settings import Settings
+from ...core.analysis.coach import FrameSet, SwimCoach
 from ...core.analysis.models import (
-    AnalysisResult,
+    ANALYSIS_COMPLETE,
+    ANALYSIS_FAILED,
+    ANALYSIS_PROCESSING,
     CoachingSession,
     StrokeType,
     VideoMetadata,
 )
+from ...infrastructure.snowflake.client import create_snowflake_connection
+from ...infrastructure.snowflake.repositories.knowledge import KnowledgeRepository
+from ...infrastructure.snowflake.repositories.sessions import SessionRepository
 from ..dependencies import (
     AuthenticatedUser,
-    KnowledgeRepositoryDep,
     SessionRepositoryDep,
     SettingsDep,
     StorageClientDep,
     SwimCoachDep,
     UsageLimitRepositoryDep,
+    _snowflake_config,
+    get_mock_snowflake_connection,
+    get_storage_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,13 +88,11 @@ class FeedbackItem(BaseModel):
     )
 
 
-class AnalysisResponse(BaseModel):
-    """Response with coaching analysis."""
+class AnalysisJobResponse(BaseModel):
+    """Acknowledgement that analysis has been queued (run in the background)."""
     session_id: UUID = Field(description="Session identifier")
-    stroke_type: str = Field(description="Stroke type analyzed")
-    summary: str = Field(description="Overall analysis summary")
-    feedback: list[FeedbackItem] = Field(description="Coaching feedback items")
-    frame_count: int = Field(description="Number of frames analyzed")
+    status: str = Field(description="Job status (processing)")
+    message: str = Field(description="Where to poll for the result")
 
 
 # ---------------------------------------------------------------------------
@@ -219,36 +235,142 @@ async def upload_frames(
     )
 
 
+# ---------------------------------------------------------------------------
+# Background analysis job
+# ---------------------------------------------------------------------------
+
+# Frames are uploaded as frames/{session_id}/{n:04d}.jpg at 0.5s spacing.
+# TODO: fix later - frame count is probed, not tracked. Kept at 20 to preserve prior
+# behavior; bump toward max_frames_per_upload once cost/latency tradeoff is decided.
+_MAX_PROBE_FRAMES = 20
+
+
+async def _load_frames(storage, session_id: UUID) -> tuple[list[bytes], list[float]]:
+    """Pull uploaded frames back out of storage, in order, until they run out."""
+    frame_data: list[bytes] = []
+    timestamps: list[float] = []
+    for frame_num in range(_MAX_PROBE_FRAMES):
+        try:
+            data = await storage.download_frame(f"frames/{session_id}/{frame_num:04d}.jpg")
+        except Exception:
+            break
+        frame_data.append(data)
+        timestamps.append(frame_num * 0.5)
+    return frame_data, timestamps
+
+
+async def _analyze_and_record(
+    session_id: UUID,
+    analysis_request: "AnalysisRequest",
+    coach: SwimCoach,
+    storage,
+    repository: SessionRepository,
+    knowledge_repo: KnowledgeRepository,
+) -> None:
+    """The actual work: load frames, run Claude, persist result or failure."""
+    try:
+        session = repository.get_session(session_id)
+    except Exception as e:
+        # No session row to record status against — nothing we can do but log.
+        logger.error("Background analysis: session vanished", extra={"session_id": str(session_id), "error": str(e)})
+        return
+
+    try:
+        frame_data, frame_timestamps = await _load_frames(storage, session_id)
+        if not frame_data:
+            raise RuntimeError("No frames found for this session")
+
+        # RAG is optional — gracefully degrades if no knowledge
+        knowledge_context: list[str] = []
+        try:
+            chunks = knowledge_repo.get_relevant_for_stroke(
+                stroke_type=analysis_request.stroke_type.value,
+                analysis_summary=analysis_request.user_notes or None,
+                limit=5,
+            )
+            knowledge_context = [c.content for c in chunks]
+        except Exception as e:
+            logger.warning("RAG retrieval failed, proceeding without", extra={"session_id": str(session_id), "error": str(e)})
+
+        frames = FrameSet(frames=frame_data, timestamps_seconds=frame_timestamps)
+        analysis = await coach.analyze_video(
+            frames=frames,
+            stroke_type=analysis_request.stroke_type,
+            user_notes=analysis_request.user_notes,
+            knowledge_context=knowledge_context or None,
+        )
+
+        session.analysis = analysis
+        session.status = ANALYSIS_COMPLETE
+        session.error = None
+        repository.save_session(session)
+        logger.info("Analysis complete", extra={"session_id": str(session_id), "frame_count": len(frame_data)})
+
+    except Exception as e:
+        logger.error("Analysis failed", extra={"session_id": str(session_id), "error": str(e)})
+        try:
+            session.status = ANALYSIS_FAILED
+            session.error = str(e)[:1000]
+            repository.save_session(session)
+        except Exception as save_err:
+            logger.error("Could not record failure status", extra={"session_id": str(session_id), "error": str(save_err)})
+
+
+async def _run_analysis(
+    session_id: UUID,
+    analysis_request: "AnalysisRequest",
+    settings: Settings,
+    coach: SwimCoach,
+) -> None:
+    """Background entrypoint — builds its own resources.
+
+    Request-scoped `yield` dependencies are torn down before background tasks run
+    (FastAPI >=0.106), so we can't reuse the request's repo connection here.
+    """
+    storage = get_storage_client(settings)
+    if settings.snowflake_mock_mode:
+        conn = get_mock_snowflake_connection()
+        await _analyze_and_record(
+            session_id, analysis_request, coach, storage,
+            SessionRepository(conn), KnowledgeRepository(conn),
+        )
+    else:
+        with create_snowflake_connection(config=_snowflake_config(settings)) as conn:
+            await _analyze_and_record(
+                session_id, analysis_request, coach, storage,
+                SessionRepository(conn), KnowledgeRepository(conn),
+            )
+
+
 @router.post(
     "/{session_id}/analyze",
-    response_model=AnalysisResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Analyze uploaded frames",
-    description="Trigger AI analysis of previously uploaded frames",
+    response_model=AnalysisJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start frame analysis (async)",
+    description="Queue AI analysis. Returns immediately; poll GET /api/v1/sessions/{session_id} for status and feedback.",
 )
 async def analyze_session(
     session_id: UUID,
     analysis_request: AnalysisRequest,
     fastapi_request: Request,
+    background_tasks: BackgroundTasks,
     x_user_id: Annotated[Optional[str], Header()] = None,
     x_api_key: Annotated[Optional[str], Header()] = None,
     api_key: AuthenticatedUser = None,
     settings: SettingsDep = None,
     coach: SwimCoachDep = None,
-    storage: StorageClientDep = None,
     repository: SessionRepositoryDep = None,
     usage_limit_repo: UsageLimitRepositoryDep = None,
-    knowledge_repo: KnowledgeRepositoryDep = None,
-) -> AnalysisResponse:
-    """Analyze frames with AI. Rate-limited (3/day per user unless bypassed)."""
+) -> AnalysisJobResponse:
+    """Queue analysis and return 202. Rate-limited (3/day per user unless bypassed)."""
     logger.info(
-        "Starting analysis",
+        "Queuing analysis",
         extra={
             "session_id": str(session_id),
             "stroke_type": analysis_request.stroke_type.value,
         }
     )
-    
+
     bypass_rate_limit = False
     if x_api_key and x_api_key in settings.rate_limit_bypass_keys_list:
         bypass_rate_limit = True
@@ -259,12 +381,12 @@ async def analyze_session(
     elif x_user_id and x_user_id in settings.rate_limit_bypass_user_ids_list:
         bypass_rate_limit = True
         logger.info(f"Rate limit bypassed for user ID {x_user_id}")
-    
+
     x_user_email = fastapi_request.headers.get("x-user-email", "").lower()
     if x_user_email and x_user_email in settings.rate_limit_bypass_emails_list:
         bypass_rate_limit = True
         logger.info(f"Rate limit bypassed for email {x_user_email}")
-    
+
     if not bypass_rate_limit:
         if x_user_id:
             identifier = x_user_id
@@ -272,7 +394,7 @@ async def analyze_session(
         else:
             identifier = fastapi_request.client.host if fastapi_request.client else "unknown"
             identifier_type = "ip_address"
-        
+
         allowed, current_count, limit_max = usage_limit_repo.check_and_increment(
             identifier=identifier,
             identifier_type=identifier_type,
@@ -280,7 +402,7 @@ async def analyze_session(
             limit_max=3,
             period_hours=24
         )
-        
+
         if not allowed:
             logger.warning(
                 "Rate limit exceeded",
@@ -295,144 +417,30 @@ async def analyze_session(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"You've reached your daily limit of {limit_max} analyses. Come back tomorrow!"
             )
-        
-        logger.info(
-            "Rate limit check passed",
-            extra={
-                "identifier": identifier,
-                "count": current_count,
-                "limit": limit_max
-            }
-        )
-    
+
+    # Verify the session exists, then flag it processing so the first poll is honest.
     try:
         session = repository.get_session(session_id)
     except Exception as e:
-        logger.error(
-            "Session not found",
-            extra={"session_id": str(session_id), "error": str(e)}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found"
-        )
-    
-    if session.is_analyzed:
-        logger.warning(
-            "Session already analyzed",
-            extra={"session_id": str(session_id)}
-        )
-        # TODO: fix later - should return existing analysis or reject re-analysis
+        logger.error("Session not found", extra={"session_id": str(session_id), "error": str(e)})
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-    # TODO: fix later - frame count should be tracked, not guessed
-    frame_data: list[bytes] = []
-    frame_timestamps: list[float] = []
-    
+    session.status = ANALYSIS_PROCESSING
+    session.error = None
     try:
-        for frame_num in range(20):
-            try:
-                storage_path = f"frames/{session_id}/{frame_num:04d}.jpg"
-                data = await storage.download_frame(storage_path)
-                frame_data.append(data)
-                frame_timestamps.append(frame_num * 0.5)
-            except Exception:
-                break
-        
-        if not frame_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No frames found for this session"
-            )
-        
-        logger.debug(
-            "Loaded frames from storage",
-            extra={"session_id": str(session_id), "count": len(frame_data)}
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            "Failed to load frames",
-            extra={"session_id": str(session_id), "error": str(e)}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load frames"
-        )
-    
-    # RAG is optional — gracefully degrades if no knowledge
-    knowledge_context: list[str] = []
-    try:
-        knowledge_chunks = knowledge_repo.get_relevant_for_stroke(
-            stroke_type=analysis_request.stroke_type.value,
-            analysis_summary=analysis_request.user_notes if analysis_request.user_notes else None,
-            limit=5
-        )
-        knowledge_context = [chunk.content for chunk in knowledge_chunks]
-        
-        if knowledge_context:
-            logger.info(
-                "Retrieved RAG knowledge",
-                extra={
-                    "session_id": str(session_id),
-                    "chunk_count": len(knowledge_context),
-                    "stroke_type": analysis_request.stroke_type.value
-                }
-            )
-    except Exception as e:
-        logger.warning(
-            "RAG knowledge retrieval failed, proceeding without",
-            extra={"session_id": str(session_id), "error": str(e)}
-        )
-    
-    try:
-        frames = FrameSet(frames=frame_data, timestamps_seconds=frame_timestamps)
-        
-        analysis = await coach.analyze_video(
-            frames=frames,
-            stroke_type=analysis_request.stroke_type,
-            user_notes=analysis_request.user_notes,
-            knowledge_context=knowledge_context if knowledge_context else None,
-        )
-        
-        session.analysis = analysis
         repository.save_session(session)
-        
-        logger.info(
-            "Analysis complete",
-            extra={
-                "session_id": str(session_id),
-                "frame_count": len(frame_data),
-            }
-        )
-    
     except Exception as e:
-        logger.error(
-            "Analysis failed",
-            extra={"session_id": str(session_id), "error": str(e)}
-        )
+        logger.error("Failed to mark session processing", extra={"session_id": str(session_id), "error": str(e)})
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Analysis failed: {str(e)}"
+            detail="Failed to start analysis"
         )
-    
-    feedback_items = [
-        FeedbackItem(
-            priority=fb.priority.value,
-            category=fb.observation.category.value,
-            observation=fb.observation.description,
-            recommendation=fb.recommendation,
-            drill_suggestions=fb.drill_suggestions,
-        )
-        for fb in analysis.feedback
-    ]
-    
-    return AnalysisResponse(
+
+    background_tasks.add_task(_run_analysis, session_id, analysis_request, settings, coach)
+
+    return AnalysisJobResponse(
         session_id=session_id,
-        stroke_type=analysis.stroke_type.value,
-        summary=analysis.summary,
-        feedback=feedback_items,
-        frame_count=len(frame_data),
+        status=ANALYSIS_PROCESSING,
+        message=f"Analysis started. Poll GET /api/v1/sessions/{session_id} for status and feedback.",
     )
 

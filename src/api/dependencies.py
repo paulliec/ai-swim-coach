@@ -44,6 +44,35 @@ _mock_snowflake_connection = None
 
 
 # ---------------------------------------------------------------------------
+# Resource builders (shared by Depends providers and background tasks)
+# ---------------------------------------------------------------------------
+
+def _snowflake_config(settings: Settings) -> SnowflakeConfig:
+    """Build Snowflake config from settings. DRYs the repository providers."""
+    return SnowflakeConfig(
+        account=settings.snowflake_account,
+        user=settings.snowflake_user,
+        password=settings.snowflake_password or None,
+        private_key_path=settings.snowflake_private_key_path,
+        private_key_base64=settings.snowflake_private_key_base64,
+        database=settings.snowflake_database,
+        schema=settings.snowflake_schema,
+        warehouse=settings.snowflake_warehouse,
+        role=settings.snowflake_role,
+    )
+
+
+def get_mock_snowflake_connection():
+    """Shared in-memory connection so mock mode persists across requests/tasks."""
+    global _mock_snowflake_connection
+    if _mock_snowflake_connection is None:
+        from ..infrastructure.snowflake.client import MockSnowflakeConnection
+        _mock_snowflake_connection = MockSnowflakeConnection()
+        logger.info("Created shared mock Snowflake connection")
+    return _mock_snowflake_connection
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 
@@ -95,30 +124,10 @@ def get_session_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[SessionRepository, None, None]:
     """Provide SessionRepository. Mock mode shares connection for data persistence."""
-    global _mock_snowflake_connection
-    
     if settings.snowflake_mock_mode:
-        if _mock_snowflake_connection is None:
-            from ..infrastructure.snowflake.client import MockSnowflakeConnection
-            _mock_snowflake_connection = MockSnowflakeConnection()
-            logger.info("Created shared mock Snowflake connection for session")
-        
-        repo = SessionRepository(_mock_snowflake_connection)
-        yield repo
+        yield SessionRepository(get_mock_snowflake_connection())
     else:
-        config = SnowflakeConfig(
-            account=settings.snowflake_account,
-            user=settings.snowflake_user,
-            password=settings.snowflake_password or None,
-            private_key_path=settings.snowflake_private_key_path,
-            private_key_base64=settings.snowflake_private_key_base64,
-            database=settings.snowflake_database,
-            schema=settings.snowflake_schema,
-            warehouse=settings.snowflake_warehouse,
-            role=settings.snowflake_role,
-        )
-        
-        with create_snowflake_connection(config=config) as conn:
+        with create_snowflake_connection(config=_snowflake_config(settings)) as conn:
             yield SessionRepository(conn)
 
 
@@ -126,28 +135,10 @@ def get_usage_limit_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[UsageLimitRepository, None, None]:
     """Provide UsageLimitRepository. Separate from sessions — could move to Redis later."""
-    global _mock_snowflake_connection
-    
     if settings.snowflake_mock_mode:
-        if _mock_snowflake_connection is None:
-            from ..infrastructure.snowflake.client import MockSnowflakeConnection
-            _mock_snowflake_connection = MockSnowflakeConnection()
-
-        yield UsageLimitRepository(_mock_snowflake_connection)
+        yield UsageLimitRepository(get_mock_snowflake_connection())
     else:
-        config = SnowflakeConfig(
-            account=settings.snowflake_account,
-            user=settings.snowflake_user,
-            password=settings.snowflake_password or None,
-            private_key_path=settings.snowflake_private_key_path,
-            private_key_base64=settings.snowflake_private_key_base64,
-            database=settings.snowflake_database,
-            schema=settings.snowflake_schema,
-            warehouse=settings.snowflake_warehouse,
-            role=settings.snowflake_role,
-        )
-        
-        with create_snowflake_connection(config=config) as conn:
+        with create_snowflake_connection(config=_snowflake_config(settings)) as conn:
             yield UsageLimitRepository(conn)
 
 
@@ -155,28 +146,10 @@ def get_knowledge_repository(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Generator[KnowledgeRepository, None, None]:
     """Provide KnowledgeRepository for RAG. Mock mode returns empty results."""
-    global _mock_snowflake_connection
-    
     if settings.snowflake_mock_mode:
-        if _mock_snowflake_connection is None:
-            from ..infrastructure.snowflake.client import MockSnowflakeConnection
-            _mock_snowflake_connection = MockSnowflakeConnection()
-
-        yield KnowledgeRepository(_mock_snowflake_connection)
+        yield KnowledgeRepository(get_mock_snowflake_connection())
     else:
-        config = SnowflakeConfig(
-            account=settings.snowflake_account,
-            user=settings.snowflake_user,
-            password=settings.snowflake_password or None,
-            private_key_path=settings.snowflake_private_key_path,
-            private_key_base64=settings.snowflake_private_key_base64,
-            database=settings.snowflake_database,
-            schema=settings.snowflake_schema,
-            warehouse=settings.snowflake_warehouse,
-            role=settings.snowflake_role,
-        )
-        
-        with create_snowflake_connection(config=config) as conn:
+        with create_snowflake_connection(config=_snowflake_config(settings)) as conn:
             yield KnowledgeRepository(conn)
 
 

@@ -39,6 +39,15 @@ class FeedbackPriority(Enum):
     REFINEMENT = "refinement"  # Nice to have, for advanced swimmers
 
 
+# Analysis job lifecycle — stored in coaching_sessions.status so the frontend can
+# poll and tell "still running" from "done" from "blew up". Plain strings (not an
+# enum) so legacy rows carrying the old 'active' value load without exploding.
+ANALYSIS_PENDING = "pending"        # uploaded, analysis not yet requested
+ANALYSIS_PROCESSING = "processing"  # background job running
+ANALYSIS_COMPLETE = "complete"      # feedback ready
+ANALYSIS_FAILED = "failed"          # job errored — see CoachingSession.error
+
+
 @dataclass(frozen=True)
 class Timestamp:
     """A point in time within a video. Value object (frozen)."""
@@ -151,6 +160,8 @@ class CoachingSession:
     video: Optional[VideoMetadata] = None
     analysis: Optional[AnalysisResult] = None
     conversation: list[ChatMessage] = field(default_factory=list)
+    status: str = ANALYSIS_PENDING
+    error: Optional[str] = None  # populated when status == ANALYSIS_FAILED
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
     

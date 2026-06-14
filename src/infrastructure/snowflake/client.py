@@ -237,16 +237,39 @@ class MockSnowflakeCursor:
         if 'FROM COACHING_SESSIONS' in query and 'WHERE' in query:
             session_id = str(params[0])
             session = self._storage['coaching_sessions'].get(session_id)
-            
+
             if session:
-                params_tuple = session.get('params', ())
-                
+                # Mirror _upsert_session param order: 1=video_id, 2=analysis_id,
+                # 3=status, 4=error_message, 11=created_at, 12=updated_at.
+                p = session.get('params', ())
+                video_id = p[1] if len(p) > 1 else None
+                analysis_id = p[2] if len(p) > 2 else None
+                status = p[3] if len(p) > 3 else 'active'
+                error_message = p[4] if len(p) > 4 else None
+                created_at = p[11] if len(p) > 11 else None
+                updated_at = p[12] if len(p) > 12 else None
+
+                # Join the analysis row (if any) — _upsert_analysis param order:
+                # 1=summary, 2=observations, 3=feedback, 4=frame_count,
+                # 7=stroke_type, 12=analyzed_at.
+                a_stroke = a_summary = a_obs = a_fb = a_analyzed = None
+                a_frames = 0
+                if analysis_id:
+                    analysis = self._storage['analyses'].get(str(analysis_id))
+                    if analysis:
+                        ap = analysis.get('params', ())
+                        a_summary = ap[1] if len(ap) > 1 else None
+                        a_obs = ap[2] if len(ap) > 2 else None
+                        a_fb = ap[3] if len(ap) > 3 else None
+                        a_frames = ap[4] if len(ap) > 4 else 0
+                        a_stroke = ap[7] if len(ap) > 7 else None
+                        a_analyzed = ap[12] if len(ap) > 12 else None
+
                 self._results = [(
-                    session_id, None, None, 'active',
-                    params_tuple[1] if len(params_tuple) > 1 else None,
+                    session_id, created_at, updated_at, status, video_id,
                     None, None, None, None, None, None, None, None, None,
-                    params_tuple[2] if len(params_tuple) > 2 else None,
-                    None, None, None, None, None, None,
+                    analysis_id, a_stroke, a_summary, a_obs, a_fb, a_frames,
+                    a_analyzed, error_message,
                 )]
             else:
                 self._results = []

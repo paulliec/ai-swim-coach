@@ -3,6 +3,8 @@ import { SignIn, SignInButton, UserButton, useUser, SignedIn, SignedOut } from '
 import SessionHistory from './components/SessionHistory'
 
 const STROKE_TYPES = ['freestyle', 'backstroke', 'breaststroke', 'butterfly']
+// Cap the longest side of uploaded frames to shrink payload (vision doesn't need full res)
+const MAX_FRAME_DIM = 1280
 // API base URL - uses environment variable for production, defaults to proxy for local dev
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 
@@ -36,6 +38,7 @@ function App() {
   const [uploading, setUploading] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzingLong, setAnalyzingLong] = useState(false)
+  const [analyzeElapsed, setAnalyzeElapsed] = useState(0)
   const [sessionId, setSessionId] = useState(null)
   const [analysis, setAnalysis] = useState(null)
   const [error, setError] = useState(null)
@@ -245,11 +248,14 @@ function App() {
         
         // Draw frame to canvas
         const canvas = document.createElement('canvas')
-        
-        // Use smaller dimensions on mobile
-        const scale = isMobileDevice() ? 0.75 : 1
-        canvas.width = video.videoWidth * scale
-        canvas.height = video.videoHeight * scale
+
+        // Downsample to keep the upload small: cap the longest side, shrink
+        // further on mobile. Claude's vision doesn't need full 1080p frames.
+        const longest = Math.max(video.videoWidth, video.videoHeight) || 1
+        let scale = Math.min(1, MAX_FRAME_DIM / longest)
+        if (isMobileDevice()) scale *= 0.75
+        canvas.width = Math.round(video.videoWidth * scale)
+        canvas.height = Math.round(video.videoHeight * scale)
         
         const ctx = canvas.getContext('2d')
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
@@ -313,6 +319,49 @@ function App() {
       setSessionId(null)
       extractFrames(file)
     }
+  }
+
+  // Poll session status until the background analysis finishes (or times out).
+  // Shows real progress (elapsed + status) rather than an indefinite spinner.
+  const pollSession = async (sid) => {
+    const POLL_INTERVAL_MS = 3000
+    const TIMEOUT_MS = 4 * 60 * 1000
+    const start = Date.now()
+    const headers = {
+      'X-API-Key': apiKey,
+      'X-User-Id': user?.id || 'anonymous',
+      'X-User-Email': user?.primaryEmailAddress?.emailAddress || ''
+    }
+
+    while (Date.now() - start < TIMEOUT_MS) {
+      const elapsed = Math.round((Date.now() - start) / 1000)
+      setAnalyzeElapsed(elapsed)
+      setAnalyzingLong(elapsed >= 60)
+
+      let data = null
+      try {
+        const res = await fetch(`${API_BASE}/sessions/${sid}`, { headers })
+        if (res.ok) data = await res.json()
+      } catch {
+        // transient network hiccup — keep polling
+      }
+
+      if (data?.status === 'complete') {
+        return {
+          session_id: sid,
+          stroke_type: data.stroke_type,
+          summary: data.summary,
+          feedback: data.feedback || [],
+          frame_count: frames.length,
+        }
+      }
+      if (data?.status === 'failed') {
+        throw new Error(data.error || 'Analysis failed. Please try again.')
+      }
+
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    }
+    throw new Error('Analysis is taking longer than expected. Please check back shortly.')
   }
 
   // Upload frames and analyze
@@ -383,15 +432,12 @@ function App() {
       }
       
       setUploading(false)
-      
-      // Step 2: Analyze frames
+
+      // Step 2: Kick off analysis — returns 202 immediately, runs in background
       setAnalyzing(true)
-      
-      // Set a timeout to show "taking longer" message
-      const longWaitTimer = setTimeout(() => {
-        setAnalyzingLong(true)
-      }, 60000) // 60 seconds
-      
+      setAnalyzeElapsed(0)
+      setAnalyzingLong(false)
+
       const analyzeRes = await fetch(`${API_BASE}/analysis/${uploadData.session_id}/analyze`, {
         method: 'POST',
         headers: {
@@ -405,16 +451,14 @@ function App() {
           user_notes: userNotes
         })
       })
-      
-      // Clear the long wait timer
-      clearTimeout(longWaitTimer)
-      
+
       if (!analyzeRes.ok) {
         let errorMessage = 'Analysis failed'
-        
-        // Handle specific error codes
+
         if (analyzeRes.status === 429) {
           errorMessage = "You've reached your daily limit of 3 analyses. Come back tomorrow!"
+        } else if (analyzeRes.status === 404) {
+          errorMessage = 'Session not found. Please try uploading again.'
         } else if (analyzeRes.status === 500) {
           errorMessage = 'Something went wrong on our end. Please try again.'
         } else {
@@ -425,13 +469,14 @@ function App() {
             // Couldn't parse error response
           }
         }
-        
+
         throw new Error(errorMessage)
       }
-      
-      const analysisData = await analyzeRes.json()
+
+      // Step 3: Poll for the result (status flips to complete/failed)
+      const analysisData = await pollSession(uploadData.session_id)
       setAnalysis(analysisData)
-      
+
       // Show signup prompt for anonymous users after successful analysis
       if (!user) {
         setShowSignupPrompt(true)
@@ -444,6 +489,7 @@ function App() {
       setUploading(false)
       setAnalyzing(false)
       setAnalyzingLong(false)
+      setAnalyzeElapsed(0)
     }
   }
 
@@ -935,15 +981,15 @@ function App() {
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
                   </div>
                   <p className="text-center text-blue-900 font-medium">
-                    {analyzingLong 
-                      ? '⏱️ Taking longer than usual, please wait...' 
-                      : `🤖 Analyzing your technique... this typically takes 30-60 seconds`}
+                    {analyzingLong
+                      ? '⏱️ Still working — almost there...'
+                      : '🤖 Analyzing your technique...'}
                   </p>
-                  {!analyzingLong && (
-                    <p className="text-center text-blue-600 text-sm mt-2">
-                      Our AI coach is reviewing {frames.length} frames
-                    </p>
-                  )}
+                  <p className="text-center text-blue-600 text-sm mt-2">
+                    {agenticProgress
+                      ? agenticProgress
+                      : `Processing • ${analyzeElapsed}s elapsed${frames.length > 0 ? ` • reviewing ${frames.length} frames` : ''}`}
+                  </p>
                 </div>
               )}
 

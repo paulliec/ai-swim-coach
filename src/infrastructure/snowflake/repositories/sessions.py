@@ -12,6 +12,7 @@ from typing import Optional, Protocol
 from uuid import UUID
 
 from src.core.analysis.models import (
+    ANALYSIS_PENDING,
     AnalysisResult,
     ChatMessage,
     CoachingFeedback,
@@ -112,7 +113,8 @@ class SessionRepository:
                     a.observations,
                     a.feedback,
                     a.frame_count_analyzed,
-                    a.analyzed_at
+                    a.analyzed_at,
+                    s.error_message
                 FROM coaching_sessions s
                 LEFT JOIN videos v ON s.video_id = v.video_id
                 LEFT JOIN analyses a ON s.analysis_id = a.analysis_id
@@ -207,6 +209,10 @@ class SessionRepository:
         ))
     
     def _upsert_session(self, cursor, session: CoachingSession) -> None:
+        # Param order matters: the mock cursor reads positions 1-4 (video_id,
+        # analysis_id, status, error_message) — keep them stable if you edit this.
+        video_id = str(session.video.id) if session.video else None
+        analysis_id = str(session.analysis.id) if session.analysis else None
         cursor.execute("""
             MERGE INTO coaching_sessions AS target
             USING (SELECT %s AS session_id) AS source
@@ -214,18 +220,19 @@ class SessionRepository:
             WHEN MATCHED THEN UPDATE SET
                 video_id = %s,
                 analysis_id = %s,
+                status = %s,
+                error_message = %s,
                 updated_at = %s
             WHEN NOT MATCHED THEN INSERT (
-                session_id, video_id, analysis_id, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s)
+                session_id, video_id, analysis_id, status, error_message,
+                created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
             str(session.id),
-            str(session.video.id) if session.video else None,
-            str(session.analysis.id) if session.analysis else None,
+            video_id, analysis_id, session.status, session.error,
             session.updated_at,
             str(session.id),
-            str(session.video.id) if session.video else None,
-            str(session.analysis.id) if session.analysis else None,
+            video_id, analysis_id, session.status, session.error,
             session.created_at,
             session.updated_at,
         ))
@@ -357,6 +364,8 @@ class SessionRepository:
             video=video,
             analysis=analysis,
             conversation=messages,
+            status=session_row[3] or ANALYSIS_PENDING,
+            error=session_row[21] if len(session_row) > 21 else None,
             created_at=session_row[1],
             updated_at=session_row[2],
         )
@@ -381,6 +390,7 @@ class SessionRepository:
             id=UUID(row[0]),
             video=video,
             analysis=analysis,
+            status=row[3] or ANALYSIS_PENDING,
             created_at=row[1],
             updated_at=row[2],
         )

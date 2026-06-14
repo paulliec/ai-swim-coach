@@ -79,8 +79,10 @@ CREATE OR REPLACE TABLE coaching_sessions (
     updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     
     -- Session metadata
-    status VARCHAR(50) DEFAULT 'active',  -- active, completed, abandoned
-    
+    -- status doubles as the async analysis job state: pending, processing, complete, failed
+    status VARCHAR(50) DEFAULT 'active',
+    error_message TEXT,  -- failure detail when status = 'failed'
+
     CONSTRAINT fk_video_session FOREIGN KEY (video_id) REFERENCES videos(video_id),
     CONSTRAINT fk_analysis FOREIGN KEY (analysis_id) REFERENCES analyses(analysis_id)
 );

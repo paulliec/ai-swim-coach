@@ -117,12 +117,15 @@ around and made choices deliberately.
 ### Dead Code
 - Delete it. That's what git is for.
 
+### Commits
+- Never add Co-Authored-By tags to commit messages
+- Commit messages like a person: "fix retry logic" not
+  "Implement robust exponential backoff for API rate limiting"
+
 ### General
 - Simple and correct beats clever
 - If it works and isn't a liability, leave it alone
 - No over-engineering for hypothetical scale
-- Commit messages like a person: "fix retry logic" not
-  "Implement robust exponential backoff for API rate limiting"
 
 ## Key Files
 
