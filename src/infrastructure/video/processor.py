@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,30 @@ FFMPEG_TIMEOUT_SECONDS = 30
 class VideoProcessingError(Exception):
     """Raised when video processing fails."""
     pass
+
+
+async def _run_ffmpeg(cmd: list[str], timeout: float) -> tuple[int, bytes, bytes]:
+    """Run an ffmpeg/ffprobe command via the event loop's child watcher.
+
+    NOT subprocess.run-on-a-threadpool: forking from a threadpool worker while other
+    threads hold locks deadlocks the child before exec under the live server (fine in
+    isolation, hangs in-process). create_subprocess_exec goes through the loop's child
+    watcher instead. stdin is /dev/null so ffmpeg never blocks waiting on input.
+    Returns (returncode, stdout, stderr); raises asyncio.TimeoutError on timeout.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    return proc.returncode, stdout, stderr
 
 
 @dataclass
@@ -81,23 +104,13 @@ class FFmpegVideoProcessor:
     """FFmpeg/FFprobe video processor. Uses temp files for all operations."""
 
     def __init__(self, ffmpeg_path: str = "ffmpeg", ffprobe_path: str = "ffprobe"):
+        # No blocking `ffmpeg -version` probe here: subprocess.run forks from the
+        # threadpool worker that builds this dep and deadlocks the child before exec
+        # under the live server. ffmpeg presence is verified at deploy time; if it's
+        # genuinely missing, the first extraction call fails loudly instead.
         self._ffmpeg = ffmpeg_path
         self._ffprobe = ffprobe_path
-
-        try:
-            result = subprocess.run(
-                [self._ffmpeg, "-version"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode != 0:
-                raise RuntimeError("FFmpeg not working properly")
-            logger.info("FFmpeg video processor initialized")
-        except FileNotFoundError:
-            raise RuntimeError(
-                "FFmpeg not found. Install with: apt-get install ffmpeg"
-            )
+        logger.info("FFmpeg video processor initialized")
     
     async def get_video_info(self, video_data: bytes) -> VideoInfo:
         """Extract metadata via FFprobe."""
@@ -114,19 +127,16 @@ class FFmpegVideoProcessor:
                 "-show_streams",
                 tmp_path
             ]
-            
-            result = await asyncio.to_thread(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if result.returncode != 0:
-                raise RuntimeError(f"FFprobe failed: {result.stderr}")
-            
-            info = json.loads(result.stdout)
+
+            try:
+                returncode, stdout, stderr = await _run_ffmpeg(cmd, timeout=30)
+            except asyncio.TimeoutError:
+                raise RuntimeError("FFprobe timed out reading video metadata")
+
+            if returncode != 0:
+                raise RuntimeError(f"FFprobe failed: {stderr.decode(errors='ignore')}")
+
+            info = json.loads(stdout)
 
             video_stream = None
             for stream in info.get("streams", []):
@@ -183,6 +193,7 @@ class FFmpegVideoProcessor:
 
                     cmd = [
                         self._ffmpeg,
+                        "-nostdin",  # never wait on stdin (also DEVNULL'd in _run_ffmpeg)
                         "-ss", str(ts),
                         "-i", video_path,
                         "-frames:v", "1",
@@ -190,35 +201,32 @@ class FFmpegVideoProcessor:
                         "-y",  # overwrite
                         output_path
                     ]
-                    
+
                     try:
-                        result = await asyncio.to_thread(
-                            subprocess.run,
-                            cmd,
-                            capture_output=True,
-                            timeout=FFMPEG_TIMEOUT_SECONDS
+                        returncode, _stdout, stderr = await _run_ffmpeg(
+                            cmd, timeout=FFMPEG_TIMEOUT_SECONDS
                         )
-                        
-                        if result.returncode == 0 and os.path.exists(output_path):
-                            with open(output_path, "rb") as f:
-                                frame_data = f.read()
-                            
-                            frames.append(ExtractedFrame(
-                                timestamp_seconds=ts,
-                                frame_number=i,
-                                data=frame_data,
-                            ))
-                        else:
-                            logger.warning(
-                                f"Failed to extract frame at {ts}s: {result.stderr.decode()}"
-                            )
-                    except subprocess.TimeoutExpired:
+                    except asyncio.TimeoutError:
                         logger.error(
                             f"FFmpeg timed out extracting frame at {ts}s after {FFMPEG_TIMEOUT_SECONDS}s"
                         )
                         raise VideoProcessingError(
                             f"Video processing timed out. The video may be too large or in an unsupported format. "
                             f"Try a shorter video (<2 minutes) or convert to MP4/H.264."
+                        )
+
+                    if returncode == 0 and os.path.exists(output_path):
+                        with open(output_path, "rb") as f:
+                            frame_data = f.read()
+
+                        frames.append(ExtractedFrame(
+                            timestamp_seconds=ts,
+                            frame_number=i,
+                            data=frame_data,
+                        ))
+                    else:
+                        logger.warning(
+                            f"Failed to extract frame at {ts}s: {stderr.decode(errors='ignore')}"
                         )
             
             logger.info(
